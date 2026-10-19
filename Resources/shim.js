@@ -287,6 +287,14 @@
   }
   document.addEventListener('DOMContentLoaded', function () { applyAspect(); setInterval(applyAspect, 1000); });
   window.addEventListener('resize', applyAspect);
+  // Alabaster Dawn: the in-game "Screen Aspect" option (injected into options.json) lands in localStorage.
+  if (boot.gameId === 'alabaster') setInterval(function () {
+    try {
+      var v = JSON.parse(localStorage.getItem('xg_local_options') || '{}')['display-aspect'];
+      var m = ['fit', 'fill', 'wide'][v];
+      if (m && m !== aspectMode) { aspectMode = m; applyAspect(); post({ op: 'aspect', mode: m }); }
+    } catch (e) {}
+  }, 500);
   function patched() {
     var real = [];
     try { real = [].slice.call(realGetGamepads()); } catch (e) {}
@@ -376,7 +384,22 @@
       hide.style.opacity = overlayVisible ? 1 : 0.4;
     }, { passive: false });
 
+    // System buttons (display mode / hide pad / game menu) live outside `root` so they stay reachable
+    // with a controller: they show whenever the touch pad shows, or for 3s after any touch.
+    var sys = document.createElement('div');
+    sys.style.cssText = 'position:fixed;top:calc(8px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:99999;' +
+      'display:flex;gap:10px;pointer-events:none;align-items:center';
+    [home, hide].forEach(function (b) {
+      b.style.position = 'static'; b.style.left = b.style.top = ''; b.style.transform = '';
+      b.style.width = b.style.height = '38px'; b.style.fontSize = '17px'; b.style.flex = 'none';
+      sys.appendChild(b);
+    });
+    document.body.appendChild(sys);
+    var sysUntil = 0;
+    window.addEventListener('touchstart', function () { sysUntil = Date.now() + 3000; }, { capture: true, passive: true });
+
     function sync() {
+      sys.style.display = (!(hasReal || nativeConnected) || Date.now() < sysUntil) ? 'flex' : 'none';
       try { hasReal = [].slice.call(realGetGamepads()).some(function (g) { return g && g.connected; }); } catch (e) {}
       root.style.display = (hasReal || nativeConnected) ? 'none' : '';
       setTimeout(sync, 300);

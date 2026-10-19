@@ -44,6 +44,13 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(appInactive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] n in
+            let c = n.object as? GCController
+            self?.appendLog("GC connected: (c?.vendorName ?? "?") category=(c?.productCategory ?? "?") extended=(c?.extendedGamepad != nil)")
+        }
+        nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in self?.appendLog("GC disconnected") }
+        GCController.startWirelessControllerDiscovery(completionHandler: {})
         showMenu()
     }
 
@@ -79,16 +86,8 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             status.text = missing.isEmpty ? "" : "Not installed: " + missing.joined(separator: ", ")
         }
         menu.addArrangedSubview(status)
-        let label = Self.aspectModes.first { $0.0 == aspect }?.1 ?? "Original 16:9"
-        menu.addArrangedSubview(makeButton("Display: (label)", #selector(cycleAspect), prominent: false))
         menu.addArrangedSubview(makeButton("Import game folder...", #selector(pickFolder), prominent: false))
         setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
-    }
-
-    @objc private func cycleAspect() {
-        let i = Self.aspectModes.firstIndex { $0.0 == aspect } ?? 0
-        aspect = Self.aspectModes[(i + 1) % Self.aspectModes.count].0
-        showMenu()
     }
 
     @objc private func playTapped(_ b: UIButton) { launch(Games.all[b.tag]) }
@@ -128,7 +127,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let store = GameStore.shared
         let cfg = WKWebViewConfiguration()
-        cfg.setURLSchemeHandler(GameSchemeHandler(root: root), forURLScheme: "ada")
+        cfg.setURLSchemeHandler(GameSchemeHandler(root: root, gameId: game.id, aspectIndex: Self.aspectModes.firstIndex { $0.0 == aspect } ?? 0), forURLScheme: "ada")
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.userContentController.add(self, name: "ada")
@@ -140,7 +139,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             "dataPath": game.dataPath,
             "desktopProcess": game.desktopProcess,
             "gameId": game.id,
-            "aspect": aspect,
+            "aspect": game.id == "alabaster" ? aspect : "fit",
         ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"
@@ -178,6 +177,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         switch op {
         case "put": if let g = current, let k = d["key"] as? String, let s = d["data"] as? String { store.putSave(g, key: k, data: s) }
         case "del": if let g = current, let k = d["key"] as? String { store.delSave(g, key: k) }
+        case "aspect": if let m = d["mode"] as? String { aspect = m }
         case "log": appendLog((d["msg"] as? String) ?? "")
         case "quit", "menu":
             // Give pending save messages a moment, then return to the launcher.
