@@ -121,7 +121,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         switch op {
         case "put": if let k = d["key"] as? String, let s = d["data"] as? String { store.putSave(key: k, data: s) }
         case "del": if let k = d["key"] as? String { store.delSave(key: k) }
-        case "log": NSLog("[ada-js] %@", (d["msg"] as? String) ?? "")
+        case "log": appendLog((d["msg"] as? String) ?? "")
         case "quit": break // iOS apps do not self-terminate
         case "reimport":
             try? FileManager.default.removeItem(at: store.importDir)
@@ -129,6 +129,24 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             status.isHidden = false
             startIfPossible()
         default: break
+        }
+    }
+
+    /// Appends to Documents/AlabasterDawn.log (visible in the Files app). Truncated on each launch.
+    private static let logQueue = DispatchQueue(label: "ada.log")
+    private static var logStarted = false
+    private func appendLog(_ msg: String) {
+        let url = GameStore.shared.docs.appendingPathComponent("AlabasterDawn.log")
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+        Self.logQueue.async {
+            if !Self.logStarted {
+                Self.logStarted = true
+                try? Data().write(to: url)
+            }
+            guard let data = line.data(using: .utf8), let h = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? h.close() }
+            h.seekToEndOfFile()
+            if h.offsetInFile < 2_000_000 { h.write(data) }
         }
     }
 
