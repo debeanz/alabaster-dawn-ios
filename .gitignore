@@ -1,0 +1,8 @@
+*.xcodeproj
+build/
+Payload/
+*.ipa
+build.log
+# never commit game files
+terra/
+Game/
