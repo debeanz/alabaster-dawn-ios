@@ -23,7 +23,7 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
         if let c = cached { return c }
         var out = data
         if gameId == "alabaster", rel == "data/database/options.json", var str = String(data: data, encoding: .utf8) {
-            let entry = "\"display-aspect\":{\"debug\":false,\"description\":{\"en_US\":\"Original keeps the 16:9 picture. Full and 1.943:1 stretch the image to fill the screen.\"},\"hidden\":false,\"label\":{\"en_US\":\"Screen Aspect\"},\"local\":true,\"type\":{\"default\":(aspectIndex),\"list\":[{\"en_US\":\"16:9\"},{\"en_US\":\"Full\"},{\"en_US\":\"1.943:1\"}],\"type\":\"RADIO_GROUP\"},\"category\":\"GRAPHICS\"},"
+            let entry = "\"display-aspect\":{\"debug\":false,\"description\":{\"en_US\":\"Original keeps the 16:9 picture. Full and 1.943:1 stretch the image to fill the screen.\"},\"hidden\":false,\"label\":{\"en_US\":\"Screen Aspect\"},\"local\":true,\"type\":{\"default\":\(aspectIndex),\"list\":[{\"en_US\":\"16:9\"},{\"en_US\":\"Full\"},{\"en_US\":\"1.943:1\"}],\"type\":\"RADIO_GROUP\"},\"category\":\"GRAPHICS\"},"
             if let r = str.range(of: "\"fullscreen\":{") { str.insert(contentsOf: entry, at: r.lowerBound); out = str.data(using: .utf8) ?? data }
         } else if gameId == "crosscode", rel == "js/game.compiled.js", var str = String(data: data, encoding: .utf8) {
             str = str.replacingOccurrences(of: "STRETCH:3}", with: "STRETCH:3,WIDE:4}")
