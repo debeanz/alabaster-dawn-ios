@@ -6,3 +6,4 @@ build.log
 # never commit game files
 terra/
 Game/
+dl/

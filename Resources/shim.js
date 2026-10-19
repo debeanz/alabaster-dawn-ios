@@ -10,6 +10,45 @@
   window.addEventListener('error', function (e) { log('JS error: ' + e.message + ' @' + e.filename + ':' + e.lineno); });
   window.addEventListener('unhandledrejection', function (e) { log('Unhandled rejection: ' + (e.reason && (e.reason.stack || e.reason))); });
 
+  // ---------- on-screen debug log (remove once stable) ----------
+  var dbgLines = [], dbgEl = null;
+  function dbg(s) {
+    s = String(s).slice(0, 160); log(s);
+    dbgLines.push(s); if (dbgLines.length > 14) dbgLines.shift();
+    if (!dbgEl && document.body) {
+      dbgEl = document.createElement('pre');
+      dbgEl.style.cssText = 'position:fixed;left:4px;top:4px;right:4px;z-index:100000;margin:0;pointer-events:none;' +
+        'color:#0f0;background:rgba(0,0,0,.6);font:10px/1.2 monospace;white-space:pre-wrap;max-height:60%;overflow:hidden';
+      document.body.appendChild(dbgEl);
+    }
+    if (dbgEl) dbgEl.textContent = dbgLines.join('\n');
+  }
+  window.addEventListener('error', function (e) { dbg('ERR ' + e.message + ' @' + String(e.filename).split('/').pop() + ':' + e.lineno); });
+  window.addEventListener('unhandledrejection', function (e) { dbg('REJ ' + (e.reason && (e.reason.message || e.reason))); });
+  ['error', 'warn'].forEach(function (k) {
+    var o = console[k]; console[k] = function () { dbg(k + ': ' + [].slice.call(arguments).join(' ')); o.apply(console, arguments); };
+  });
+  var oOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (m, u) {
+    this.addEventListener('loadend', function () { if (this.status !== 200) dbg('XHR ' + this.status + ' ' + u); });
+    return oOpen.apply(this, arguments);
+  };
+  var oFetch = window.fetch;
+  window.fetch = function (u) {
+    return oFetch.apply(this, arguments).then(function (r) { if (!r.ok) dbg('FETCH ' + r.status + ' ' + u); return r; },
+      function (e) { dbg('FETCH FAIL ' + u + ' ' + e); throw e; });
+  };
+  document.addEventListener('DOMContentLoaded', function () {
+    dbg('boot ok, files=' + boot.manifest.length + ' saves=' + Object.keys(boot.saves || {}).length);
+    var gl = document.createElement('canvas').getContext('webgl2');
+    dbg('webgl2=' + !!gl + ' win=' + innerWidth + 'x' + innerHeight + ' dpr=' + devicePixelRatio);
+    setTimeout(function () {
+      var c = document.querySelector('canvas');
+      dbg('canvas=' + (c ? c.width + 'x' + c.height + ' css ' + c.style.width + 'x' + c.style.height : 'none') +
+        ' boot=' + (window.g && window.g.resource && window.g.resource.bootTracker ? 'tracker' : 'n/a'));
+    }, 8000);
+  });
+
   // ---------- viewport / page CSS ----------
   var head = document.documentElement;
   var meta = document.createElement('meta');
