@@ -15,6 +15,7 @@
   function dbg(s) {
     s = String(s).slice(0, 160); log(s);
     dbgLines.push(s); if (dbgLines.length > 14) dbgLines.shift();
+    if (!window.__ADA_DEBUG) return;
     if (!dbgEl && document.body) {
       dbgEl = document.createElement('pre');
       dbgEl.style.cssText = 'position:fixed;left:4px;top:4px;right:4px;z-index:100000;margin:0;pointer-events:none;' +
