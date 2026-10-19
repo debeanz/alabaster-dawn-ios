@@ -274,27 +274,67 @@
     for (var a = 0; a < 4; a++) vpad.axes[a] = nativeState.a[a] || 0;
   }
 
-  // ---------- display aspect (fit | fill | wide) ----------
-  var aspectMode = boot.aspect || 'fit';
+  // ---------- display settings (in-game options, mirrored to native so they survive restarts) ----------
+  var settings = boot.settings || {};
+  function saveSetting(k, v) {
+    if (settings[k] === v) return;
+    settings[k] = v; post({ op: 'setting', key: k, value: v });
+  }
+  var dpr = window.devicePixelRatio || 1;
+  var nativeW = Math.round(Math.max(screen.width, screen.height) * dpr);
+  var nativeH = Math.round(Math.min(screen.width, screen.height) * dpr);
+  // Alabaster Dawn: "Native" entry of the patched Resolution list (render scale vs. the 640x360 base).
+  window.__adaNativeScale = Math.min(4, Math.round(nativeH / 360 * 100) / 100);
+
+  var aspectMode = 'fit';
   function applyAspect() {
     var st = document.getElementById('__ada_aspect');
     if (!st && document.head) { st = document.createElement('style'); st.id = '__ada_aspect'; document.head.appendChild(st); }
     if (!st) return;
-    if (aspectMode === 'fit') { st.textContent = ''; return; }
-    var W = innerWidth, H = innerHeight, w = aspectMode === 'wide' ? Math.min(W, H * 1.943) : W;
-    st.textContent = '#game canvas,canvas.xgCanvas,#canvas{position:fixed!important;left:' + ((W - w) / 2) + 'px!important;top:0!important;' +
-      'width:' + w + 'px!important;height:' + H + 'px!important;margin:0!important;transform:none!important;max-width:none!important;max-height:none!important}';
+    if (aspectMode !== 'fill') { st.textContent = ''; return; }
+    st.textContent = 'canvas.xgCanvas,#game canvas{position:fixed!important;left:0!important;top:0!important;width:100vw!important;' +
+      'height:100vh!important;margin:0!important;transform:none!important;max-width:none!important;max-height:none!important}';
   }
   document.addEventListener('DOMContentLoaded', function () { applyAspect(); setInterval(applyAspect, 1000); });
   window.addEventListener('resize', applyAspect);
-  // Alabaster Dawn: the in-game "Screen Aspect" option (injected into options.json) lands in localStorage.
-  if (boot.gameId === 'alabaster') setInterval(function () {
+
+  if (boot.gameId === 'alabaster') {
+    var AD_KEYS = ['pixel-size', 'screen-scaling'];
+    // Seed the engine's local options from the native copy, and drop out-of-range resolution values.
     try {
-      var v = JSON.parse(localStorage.getItem('xg_local_options') || '{}')['display-aspect'];
-      var m = ['fit', 'fill', 'wide'][v];
-      if (m && m !== aspectMode) { aspectMode = m; applyAspect(); post({ op: 'aspect', mode: m }); }
+      var lo = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
+      AD_KEYS.forEach(function (k) { if (typeof settings[k] === 'number') lo[k] = settings[k]; });
+      if (typeof lo['pixel-size'] === 'number' && (lo['pixel-size'] < 0 || lo['pixel-size'] > 4)) lo['pixel-size'] = 0;
+      localStorage.setItem('xg_local_options', JSON.stringify(lo));
+      aspectMode = lo['screen-scaling'] === 1 ? 'fill' : 'fit';
     } catch (e) {}
-  }, 500);
+    setInterval(function () {
+      try {
+        var o = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
+        AD_KEYS.forEach(function (k) { if (typeof o[k] === 'number') saveSetting(k, o[k]); });
+        var m = o['screen-scaling'] === 1 ? 'fill' : 'fit';
+        if (m !== aspectMode) { aspectMode = m; applyAspect(); }
+      } catch (e) {}
+    }, 500);
+  }
+
+  if (boot.gameId === 'crosscode') {
+    // Patched "Resolution" option: logical game size = resolution / integer pixel scale (CrossCode needs >= 320 lines).
+    var RES = [[nativeW, nativeH], [2106, 1084], [1920, 1080], [1600, 900], [1280, 720]];
+    var r = RES[settings['ada-resolution']] || RES[0];
+    var s = Math.max(1, Math.min(4, Math.floor(r[1] / 320)));
+    var fixed = { IG_WIDTH: Math.round(r[0] / s), IG_HEIGHT: Math.round(r[1] / s), IG_GAME_SCALE: s };
+    Object.keys(fixed).forEach(function (k) {
+      Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
+    });
+    log('crosscode logical ' + fixed.IG_WIDTH + 'x' + fixed.IG_HEIGHT + ' x' + s);
+    setInterval(function () {
+      try {
+        var v = window.sc && sc.options && sc.options.values && sc.options.values['ada-resolution'];
+        if (typeof v === 'number') saveSetting('ada-resolution', v);
+      } catch (e) {}
+    }, 500);
+  }
   function patched() {
     var real = [];
     try { real = [].slice.call(realGetGamepads()); } catch (e) {}

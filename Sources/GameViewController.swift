@@ -11,10 +11,10 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     private let menu = UIStackView()
     private var padLink: CADisplayLink?
     private var lastPad = ""
-    private static let aspectModes = [("fit", "Original 16:9"), ("fill", "Full screen"), ("wide", "1.943:1")]
-    private var aspect: String {
-        get { UserDefaults.standard.string(forKey: "aspect") ?? "fit" }
-        set { UserDefaults.standard.set(newValue, forKey: "aspect") }
+    private var padFrames = 0
+    /// Per-game display settings mirrored from the in-game options (resolution, screen scaling).
+    private func settings(_ id: String) -> [String: Any] {
+        UserDefaults.standard.dictionary(forKey: "settings.(id)") ?? [:]
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -127,7 +127,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let store = GameStore.shared
         let cfg = WKWebViewConfiguration()
-        cfg.setURLSchemeHandler(GameSchemeHandler(root: root, gameId: game.id, aspectIndex: Self.aspectModes.firstIndex { $0.0 == aspect } ?? 0), forURLScheme: "ada")
+        cfg.setURLSchemeHandler(GameSchemeHandler(root: root, gameId: game.id), forURLScheme: "ada")
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.userContentController.add(self, name: "ada")
@@ -139,7 +139,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             "dataPath": game.dataPath,
             "desktopProcess": game.desktopProcess,
             "gameId": game.id,
-            "aspect": game.id == "alabaster" ? aspect : "fit",
+            "settings": settings(game.id),
         ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"
@@ -177,7 +177,11 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         switch op {
         case "put": if let g = current, let k = d["key"] as? String, let s = d["data"] as? String { store.putSave(g, key: k, data: s) }
         case "del": if let g = current, let k = d["key"] as? String { store.delSave(g, key: k) }
-        case "aspect": if let m = d["mode"] as? String { aspect = m }
+        case "setting":
+            if let g = current, let k = d["key"] as? String, let val = d["value"] {
+                var s = settings(g.id); s[k] = val
+                UserDefaults.standard.set(s, forKey: "settings.(g.id)")
+            }
         case "log": appendLog((d["msg"] as? String) ?? "")
         case "quit", "menu":
             // Give pending save messages a moment, then return to the launcher.
@@ -217,7 +221,9 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
                      gp.rightThumbstick.xAxis.value, -gp.rightThumbstick.yAxis.value].map { String(format: "%.2f", $0) }.joined(separator: ",")
             json = "{\"c\":1,\"b\":[(b)],\"a\":[(a)]}"
         }
-        if json == lastPad { return }
+        // Resend every ~0.5s too: the first sends can land before the page (and the shim) exists.
+        padFrames += 1
+        if json == lastPad && padFrames % 30 != 0 { return }
         lastPad = json
         wv.evaluateJavaScript("window.__adaN&&window.__adaN((json))")
     }

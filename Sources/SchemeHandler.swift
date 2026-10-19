@@ -8,33 +8,44 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
     private let queue = DispatchQueue(label: "ada.scheme", qos: .userInitiated, attributes: .concurrent)
 
     let gameId: String
-    let aspectIndex: Int
     private var patched: [String: Data] = [:]
 
-    init(root: URL, gameId: String, aspectIndex: Int) {
+    init(root: URL, gameId: String) {
         self.root = root.standardizedFileURL
         self.gameId = gameId
-        self.aspectIndex = aspectIndex
     }
 
-    /// Adds in-game settings entries by patching the served data (the game files on disk are never edited).
+    private static let adPixelOld = #""type":{"default":1,"list":[{"en_US":"640x360","langID":171},{"en_US":"1280x720","langID":172},{"en_US":"1920x1080","langID":173},{"en_US":"2560x1440","langID":203},{"en_US":"4096x2160","langID":204}],"type":"RADIO_GROUP"}"#
+    private static let adPixelNew = #""type":{"default":0,"list":[{"en_US":"1280x720"},{"en_US":"1600x900"},{"en_US":"1920x1080"},{"en_US":"2106x1084"},{"en_US":"Native (max)"}],"type":"RADIO_GROUP"}"#
+    private static let adScaling = #""screen-scaling":{"debug":false,"description":{"en_US":"Fit keeps the 16:9 picture with black bars. Stretch fills the whole screen."},"hidden":false,"inset":true,"label":{"en_US":"Screen Scaling"},"local":true,"type":{"default":0,"list":[{"en_US":"Fit"},{"en_US":"Stretch"}],"type":"RADIO_GROUP"},"category":"GRAPHICS"},"#
+    private static let ccDefAnchor = #""display-type":{type:"BUTTON_GROUP",data:sc.DISPLAY_TYPE,init:sc.DISPLAY_TYPE.FIT,cat:sc.OPTION_CATEGORY.VIDEO},"#
+    private static let ccResDef = #""ada-resolution":{type:"BUTTON_GROUP",data:{NATIVE:0,R2106:1,R1920:2,R1600:3,R1280:4},init:0,cat:sc.OPTION_CATEGORY.VIDEO,restart:true},"#
+
+    /// Adds/changes in-game settings by patching the served data (the game files on disk are never edited).
     private func patch(_ rel: String, _ data: Data) -> Data {
         lock.lock(); let cached = patched[rel]; lock.unlock()
         if let c = cached { return c }
         var out = data
         if gameId == "alabaster", rel == "data/database/options.json", var str = String(data: data, encoding: .utf8) {
-            let entry = "\"display-aspect\":{\"debug\":false,\"description\":{\"en_US\":\"Original keeps the 16:9 picture. Full and 1.943:1 stretch the image to fill the screen.\"},\"hidden\":false,\"label\":{\"en_US\":\"Screen Aspect\"},\"local\":true,\"type\":{\"default\":\(aspectIndex),\"list\":[{\"en_US\":\"16:9\"},{\"en_US\":\"Full\"},{\"en_US\":\"1.943:1\"}],\"type\":\"RADIO_GROUP\"},\"category\":\"GRAPHICS\"},"
-            if let r = str.range(of: "\"fullscreen\":{") { str.insert(contentsOf: entry, at: r.lowerBound); out = str.data(using: .utf8) ?? data }
+            // Resolution list tuned for iPhone (the stock 4096x2160 entry crashes WebKit), plus Fit/Stretch.
+            str = str.replacingOccurrences(of: Self.adPixelOld, with: Self.adPixelNew)
+            if let r = str.range(of: #""fullscreen":{"#) { str.insert(contentsOf: Self.adScaling, at: r.lowerBound) }
+            out = str.data(using: .utf8) ?? data
+        } else if gameId == "alabaster", rel == "dist/bundle.js", var str = String(data: data, encoding: .utf8) {
+            // Render scale relative to the 640x360 base, matching the list above.
+            str = str.replacingOccurrences(of: "const RESOLUTION_MAP = [1, 2, 3, 4, 6];",
+                                           with: "const RESOLUTION_MAP = [2, 2.5, 3, 3, (window.__adaNativeScale || 3)];")
+            out = str.data(using: .utf8) ?? data
         } else if gameId == "crosscode", rel == "js/game.compiled.js", var str = String(data: data, encoding: .utf8) {
-            str = str.replacingOccurrences(of: "STRETCH:3}", with: "STRETCH:3,WIDE:4}")
-            str = str.replacingOccurrences(of: "case sc.DISPLAY_TYPE.STRETCH:k=true;a=b;b=i;j=true;break;",
-                with: "case sc.DISPLAY_TYPE.STRETCH:k=true;a=b;b=i;j=true;break;case sc.DISPLAY_TYPE.WIDE:k=true;a=Math.min(b,i*1.943);b=i;j=true;break;")
+            str = str.replacingOccurrences(of: Self.ccDefAnchor, with: Self.ccResDef + Self.ccDefAnchor)
             out = str.data(using: .utf8) ?? data
         } else if gameId == "crosscode", rel.hasPrefix("data/lang/sc/gui."), rel.hasSuffix(".json"),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  var labels = obj["labels"] as? [String: Any], var opts = labels["options"] as? [String: Any],
-                  var dt = opts["display-type"] as? [String: Any], var group = dt["group"] as? [Any] {
-            group.append("1.943:1"); dt["group"] = group; opts["display-type"] = dt; labels["options"] = opts; obj["labels"] = labels
+                  var labels = obj["labels"] as? [String: Any], var opts = labels["options"] as? [String: Any] {
+            opts["ada-resolution"] = ["name": "Resolution",
+                                      "group": ["Native", "2106x1084", "1920x1080", "1600x900", "1280x720"],
+                                      "description": "Game resolution and aspect ratio. Wider resolutions show more of the world. Needs a restart (return to the game menu and start CrossCode again)."]
+            labels["options"] = opts; obj["labels"] = labels
             out = (try? JSONSerialization.data(withJSONObject: obj, options: [.withoutEscapingSlashes])) ?? data
         }
         lock.lock(); patched[rel] = out; lock.unlock()

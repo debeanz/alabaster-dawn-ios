@@ -14,7 +14,7 @@ struct GameDef {
 enum Games {
     static let all: [GameDef] = [
         GameDef(id: "alabaster", title: "Alabaster Dawn", markers: ["index.html", "dist/bundle.js"],
-                installSubdir: "terra", entry: "index.html", fsPrefix: "", dataPath: "/data", desktopProcess: false),
+                installSubdir: "terra", entry: "index.html", fsPrefix: "terra/", dataPath: "/data", desktopProcess: false),
         GameDef(id: "crosscode", title: "CrossCode", markers: ["node-webkit.html", "js/game.compiled.js"],
                 installSubdir: "assets", entry: "node-webkit.html", fsPrefix: "assets/", dataPath: "/saves/Default", desktopProcess: true),
     ]
