@@ -264,13 +264,39 @@
 
   var realGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : function () { return []; };
   var overlayVisible = true, hasReal = false;
+  // Native GameController fallback: Swift polls GCController and pushes state here, so a physical
+  // pad works (and the touch overlay hides) even if WebKit has not exposed it via the Gamepad API.
+  var nativeConnected = false, nativeState = null;
+  window.__adaN = function (s) { nativeConnected = !!(s && s.c); nativeState = nativeConnected ? s : null; };
+  function applyNative() {
+    for (var i = 0; i < 17; i++) setBtn(i, (nativeState.b[i] || 0) > 0.3);
+    for (var b = 6; b <= 7; b++) vpad.buttons[b].value = nativeState.b[b] || 0;
+    for (var a = 0; a < 4; a++) vpad.axes[a] = nativeState.a[a] || 0;
+  }
+
+  // ---------- display aspect (fit | fill | wide) ----------
+  var aspectMode = boot.aspect || 'fit';
+  function applyAspect() {
+    var st = document.getElementById('__ada_aspect');
+    if (!st && document.head) { st = document.createElement('style'); st.id = '__ada_aspect'; document.head.appendChild(st); }
+    if (!st) return;
+    if (aspectMode === 'fit') { st.textContent = ''; return; }
+    var W = innerWidth, H = innerHeight, w = aspectMode === 'wide' ? Math.min(W, H * 1.943) : W;
+    st.textContent = '#game canvas,canvas.xgCanvas,#canvas{position:fixed!important;left:' + ((W - w) / 2) + 'px!important;top:0!important;' +
+      'width:' + w + 'px!important;height:' + H + 'px!important;margin:0!important;transform:none!important;max-width:none!important;max-height:none!important}';
+  }
+  document.addEventListener('DOMContentLoaded', function () { applyAspect(); setInterval(applyAspect, 1000); });
+  window.addEventListener('resize', applyAspect);
   function patched() {
     var real = [];
     try { real = [].slice.call(realGetGamepads()); } catch (e) {}
     hasReal = real.some(function (g) { return g; });
     var out = real.slice(0, 4);
     while (out.length < 4) out.push(null);
-    if (!hasReal && overlayVisible) { vpad.timestamp = performance.now(); out.push(vpad); }
+    if (!hasReal && (nativeConnected || overlayVisible)) {
+      if (nativeConnected) applyNative();
+      vpad.timestamp = performance.now(); out.push(vpad);
+    }
     return out;
   }
   try { Object.defineProperty(navigator, 'getGamepads', { value: patched, configurable: true }); } catch (e) { navigator.getGamepads = patched; }
@@ -352,7 +378,7 @@
 
     function sync() {
       try { hasReal = [].slice.call(realGetGamepads()).some(function (g) { return g && g.connected; }); } catch (e) {}
-      root.style.display = hasReal ? 'none' : '';
+      root.style.display = (hasReal || nativeConnected) ? 'none' : '';
       setTimeout(sync, 300);
     }
     sync();

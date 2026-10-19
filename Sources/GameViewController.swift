@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import UniformTypeIdentifiers
+import GameController
 
 final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocumentPickerDelegate {
     private var webView: WKWebView?
@@ -8,6 +9,13 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     private let titleLabel = UILabel()
     private let status = UILabel()
     private let menu = UIStackView()
+    private var padLink: CADisplayLink?
+    private var lastPad = ""
+    private static let aspectModes = [("fit", "Original 16:9"), ("fill", "Full screen"), ("wide", "1.943:1")]
+    private var aspect: String {
+        get { UserDefaults.standard.string(forKey: "aspect") ?? "fit" }
+        set { UserDefaults.standard.set(newValue, forKey: "aspect") }
+    }
 
     override var prefersStatusBarHidden: Bool { true }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
@@ -56,6 +64,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     }
 
     private func showMenu() {
+        padLink?.invalidate(); padLink = nil
         webView?.removeFromSuperview(); webView = nil; current = nil
         menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
         menu.addArrangedSubview(titleLabel)
@@ -70,8 +79,16 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             status.text = missing.isEmpty ? "" : "Not installed: " + missing.joined(separator: ", ")
         }
         menu.addArrangedSubview(status)
+        let label = Self.aspectModes.first { $0.0 == aspect }?.1 ?? "Original 16:9"
+        menu.addArrangedSubview(makeButton("Display: (label)", #selector(cycleAspect), prominent: false))
         menu.addArrangedSubview(makeButton("Import game folder...", #selector(pickFolder), prominent: false))
         setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
+    }
+
+    @objc private func cycleAspect() {
+        let i = Self.aspectModes.firstIndex { $0.0 == aspect } ?? 0
+        aspect = Self.aspectModes[(i + 1) % Self.aspectModes.count].0
+        showMenu()
     }
 
     @objc private func playTapped(_ b: UIButton) { launch(Games.all[b.tag]) }
@@ -123,6 +140,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             "dataPath": game.dataPath,
             "desktopProcess": game.desktopProcess,
             "gameId": game.id,
+            "aspect": aspect,
         ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"
@@ -147,6 +165,10 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
         webView = wv
+        lastPad = ""
+        padLink?.invalidate()
+        padLink = CADisplayLink(target: self, selector: #selector(pollPad))
+        padLink?.add(to: .main, forMode: .common)
         wv.load(URLRequest(url: URL(string: "ada://game/\(game.entry)")!))
     }
 
@@ -180,6 +202,24 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             h.seekToEndOfFile()
             if h.offsetInFile < 2_000_000 { h.write(data) }
         }
+    }
+
+    /// Forwards a physical controller (GameController framework) to the shim as a standard-layout pad.
+    @objc private func pollPad() {
+        guard let wv = webView else { return }
+        var json = "{\"c\":0}"
+        if let gp = GCController.controllers().compactMap({ $0.extendedGamepad }).first {
+            let btns: [GCControllerButtonInput?] = [gp.buttonA, gp.buttonB, gp.buttonX, gp.buttonY, gp.leftShoulder, gp.rightShoulder,
+                gp.leftTrigger, gp.rightTrigger, gp.buttonOptions, gp.buttonMenu, gp.leftThumbstickButton, gp.rightThumbstickButton,
+                gp.dpad.up, gp.dpad.down, gp.dpad.left, gp.dpad.right, gp.buttonHome]
+            let b = btns.map { String(format: "%.2f", $0?.value ?? 0) }.joined(separator: ",")
+            let a = [gp.leftThumbstick.xAxis.value, -gp.leftThumbstick.yAxis.value,
+                     gp.rightThumbstick.xAxis.value, -gp.rightThumbstick.yAxis.value].map { String(format: "%.2f", $0) }.joined(separator: ",")
+            json = "{\"c\":1,\"b\":[(b)],\"a\":[(a)]}"
+        }
+        if json == lastPad { return }
+        lastPad = json
+        wv.evaluateJavaScript("window.__adaN&&window.__adaN((json))")
     }
 
     @objc private func appInactive() { webView?.evaluateJavaScript("window.__adaSuspend && window.__adaSuspend()") }
