@@ -122,7 +122,7 @@
   function readFileData(p) {
     var n = norm(p);
     if (saves[n]) return Promise.resolve(saves[n].data);
-    if (files[n]) return fetch('ada://game/' + n.split('/').map(encodeURIComponent).join('/'))
+    if (files[n]) return fetch('ada://game/' + n.slice(PFX.length).split('/').map(encodeURIComponent).join('/'))
       .then(function (r) { return r.text(); });
     return Promise.reject(enoent(p));
   }
