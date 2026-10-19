@@ -47,7 +47,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         let nc = NotificationCenter.default
         nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] n in
             let c = n.object as? GCController
-            self?.appendLog("GC connected: (c?.vendorName ?? "?") category=(c?.productCategory ?? "?") extended=(c?.extendedGamepad != nil)")
+            self?.appendLog("GC connected: \(c?.vendorName ?? "?") category=\(c?.productCategory ?? "?") extended=\(c?.extendedGamepad != nil)")
         }
         nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in self?.appendLog("GC disconnected") }
         GCController.startWirelessControllerDiscovery(completionHandler: {})

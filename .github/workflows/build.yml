@@ -14,12 +14,13 @@ jobs:
         run: xcodegen generate
       - name: Build (unsigned)
         run: |
+          set -o pipefail
           xcodebuild -project AlabasterDawn.xcodeproj -scheme AlabasterDawn \
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build.log | tail -n 40
-          test -d build/Build/Products/Release-iphoneos/AlabasterDawn.app
+          test -f build/Build/Products/Release-iphoneos/AlabasterDawn.app/AlabasterDawn
       - name: Package IPA
         run: |
           mkdir -p Payload
