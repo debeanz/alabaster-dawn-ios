@@ -66,6 +66,7 @@
   meta.name = 'viewport';
   meta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
   document.addEventListener('DOMContentLoaded', function () {
+    [].forEach.call(document.querySelectorAll('meta[name=viewport]'), function (m) { m.remove(); });
     document.head.appendChild(meta);
     var st = document.createElement('style');
     st.textContent = 'html,body{margin:0;padding:0;background:#000;overflow:hidden;touch-action:none;' +
@@ -75,6 +76,8 @@
 
   // ---------- fs (read-only game tree via manifest, saves via native) ----------
   var files = Object.create(null);
+  var PFX = boot.fsPrefix || '';
+  boot.manifest = boot.manifest.map(function (p) { return PFX + p; });
   boot.manifest.forEach(function (p) { files[p] = true; });
   var dirs = Object.create(null);
   boot.manifest.forEach(function (p) {
@@ -151,13 +154,24 @@
         Object.keys(src).forEach(function (k) {
           if (n === '' || k.indexOf(n + '/') === 0) {
             var rest = k.slice(n ? n.length + 1 : 0), first = rest.split('/')[0];
-            if (first && !seen[first]) { seen[first] = 1; res.push({ name: first, isDirectory: function () { return rest.indexOf('/') >= 0; }, isFile: function () { return rest.indexOf('/') < 0; } }); }
+            if (first && !seen[first]) {
+              seen[first] = 1;
+              res.push(o && o.withFileTypes ? { name: first, isDirectory: function () { return rest.indexOf('/') >= 0; }, isFile: function () { return rest.indexOf('/') < 0; } } : first);
+            }
           }
         });
       });
       setTimeout(function () { cb(null, res); }, 0);
     },
     unlinkSync: rm,
+    readFile: function (p, o, cb) {
+      if (typeof o === 'function') cb = o;
+      readFileData(p).then(function (d) { cb(null, d); }, function (e) { cb(e); });
+    },
+    rename: function (a, b, cb) {
+      try { rename(a, b); cb && cb(null); } catch (e) { cb && cb(e); }
+    },
+    exists: function (p, cb) { var n = norm(p); cb(!!(saves[n] || files[n] || dirs[n] || saveDirs[n])); },
     writeFile: function (p, d, o, cb) {
       if (typeof o === 'function') cb = o;
       try { putSave(norm(p), d); cb && cb(null); } catch (e) { cb && cb(e); }
@@ -184,23 +198,34 @@
     extname: function (p) { var b = path.basename(p), i = b.lastIndexOf('.'); return i > 0 ? b.slice(i) : ''; }
   };
 
-  // process must stay undefined so the engine takes its browser platform path.
-  delete window.process;
+  // Alabaster Dawn: process must stay undefined so the engine takes its browser platform path.
+  // CrossCode: needs a desktop-style process object.
+  var noop = function () {};
+  if (boot.desktopProcess) {
+    window.process = { platform: 'linux', arch: 'x64', argv: ['crosscode'], pid: 1, title: 'node', browser: false,
+      versions: { 'node-webkit': '0.86.0', nw: '0.86.0', node: '21.1.0', chrome: '123.0.6312.87' },
+      env: { HOME: '/saves', TMPDIR: '/tmp' }, cwd: function () { return ''; },
+      nextTick: function (f) { setTimeout(f, 0); }, exit: noop, on: noop, once: noop, off: noop, removeListener: noop, removeAllListeners: noop };
+  } else {
+    delete window.process;
+  }
+  var greenStub = { init: function () { return false; }, isSteamRunning: function () { return false; }, activateGameOverlayToStore: function () {} };
   window.require = function (name) {
     switch (name) {
       case 'fs': return fs;
       case 'path': return path;
       case 'vm': return { createContext: function () { return {}; }, runInContext: function () {}, runInNewContext: function () {}, isContext: function () { return true; } };
-      case './greenworks/greenworks': return { init: function () { return false; }, isSteamRunning: function () { return false; }, activateGameOverlayToStore: function () {} };
-      default: return {};
+      case 'nw.gui': return window.nw;
+      default:
+        if (/greenworks/.test(name)) return greenStub;
+        return {};
     }
   };
 
-  var noop = function () {};
   var winStub = { on: noop, once: noop, off: noop, show: noop, hide: noop, enterFullscreen: noop, leaveFullscreen: noop,
     close: function () { post({ op: 'quit' }); }, resizeTo: noop, moveTo: noop, setPosition: noop, focus: noop, zoomLevel: 0, window: window };
   window.nw = {
-    App: { argv: [], dataPath: '/data', quit: function () { post({ op: 'quit' }); }, clearCache: noop },
+    App: { argv: [], dataPath: boot.dataPath || '/data', quit: function () { post({ op: 'quit' }); }, clearCache: noop },
     Window: { get: function () { return winStub; }, open: noop, getAll: function () { return []; } },
     Screen: { screens: [{ bounds: { x: 0, y: 0, width: screen.width, height: screen.height } }] },
     Clipboard: { get: function () { return { set: noop, get: function () { return ''; } }; } },
@@ -313,6 +338,11 @@
     button('left:188px;bottom:68px;' + DP, '◀', 14);
     button('left:272px;bottom:68px;' + DP, '▶', 15);
 
+    var home = mk('left:50%;top:100px;width:34px;height:34px;transform:translateX(-50%);font-size:16px;', '⌂');
+    home.addEventListener('touchstart', function (e) {
+      e.preventDefault();
+      post({ op: 'menu' });
+    }, { passive: false });
     var hide = mk('left:50%;top:60px;width:34px;height:34px;transform:translateX(-50%);font-size:12px;', '👁');
     hide.addEventListener('touchstart', function (e) {
       e.preventDefault(); overlayVisible = !overlayVisible;

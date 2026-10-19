@@ -4,8 +4,10 @@ import UniformTypeIdentifiers
 
 final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocumentPickerDelegate {
     private var webView: WKWebView?
+    private var current: GameDef?
+    private let titleLabel = UILabel()
     private let status = UILabel()
-    private let button = UIButton(type: .system)
+    private let menu = UIStackView()
 
     override var prefersStatusBarHidden: Bool { true }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
@@ -15,35 +17,64 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        status.textColor = .white
+        titleLabel.text = "Choose a game"
+        titleLabel.textColor = .white
+        titleLabel.font = .boldSystemFont(ofSize: 26)
+        status.textColor = .lightGray
         status.numberOfLines = 0
         status.textAlignment = .center
-        status.font = .systemFont(ofSize: 16)
-        button.setTitle("Import game folder", for: .normal)
-        button.addTarget(self, action: #selector(pickFolder), for: .touchUpInside)
-        let stack = UIStackView(arrangedSubviews: [status, button])
-        stack.axis = .vertical
-        stack.spacing = 16
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+        status.font = .systemFont(ofSize: 14)
+        menu.axis = .vertical
+        menu.spacing = 14
+        menu.alignment = .center
+        menu.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(menu)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            stack.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.8),
+            menu.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            menu.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            menu.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.85),
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(appInactive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appActive), name: UIApplication.didBecomeActiveNotification, object: nil)
-        startIfPossible()
+        showMenu()
     }
 
-    private func startIfPossible() {
-        if let root = GameStore.shared.findRoot() {
-            launch(root: root)
-        } else {
-            status.text = "Alabaster Dawn game files not found.\nPick your PC install folder (or its \"terra\" folder) from Files."
-            button.isHidden = false
+    // MARK: launcher
+    private func makeButton(_ title: String, _ action: Selector, tag: Int = 0, prominent: Bool = true) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setTitle(title, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: prominent ? 22 : 16, weight: prominent ? .semibold : .regular)
+        b.tag = tag
+        if prominent {
+            b.backgroundColor = UIColor(white: 1, alpha: 0.15)
+            b.setTitleColor(.white, for: .normal)
+            b.layer.cornerRadius = 12
+            b.contentEdgeInsets = UIEdgeInsets(top: 12, left: 40, bottom: 12, right: 40)
         }
+        b.addTarget(self, action: action, for: .touchUpInside)
+        return b
     }
+
+    private func showMenu() {
+        webView?.removeFromSuperview(); webView = nil; current = nil
+        menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        menu.addArrangedSubview(titleLabel)
+        let avail = GameStore.shared.available()
+        for g in avail {
+            menu.addArrangedSubview(makeButton(g.title, #selector(playTapped(_:)), tag: Games.all.firstIndex { $0.id == g.id } ?? 0))
+        }
+        if avail.isEmpty {
+            status.text = "No game files found.\nImport your PC install folder (or its terra / assets folder) from Files."
+        } else {
+            let missing = Games.all.filter { g in !avail.contains { $0.id == g.id } }.map { $0.title }
+            status.text = missing.isEmpty ? "" : "Not installed: " + missing.joined(separator: ", ")
+        }
+        menu.addArrangedSubview(status)
+        menu.addArrangedSubview(makeButton("Import game folder...", #selector(pickFolder), prominent: false))
+        setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
+    }
+
+    @objc private func playTapped(_ b: UIButton) { launch(Games.all[b.tag]) }
 
     @objc private func pickFolder() {
         let p = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
@@ -53,32 +84,31 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
-        button.isHidden = true
-        status.text = "Copying game files (~600 MB), please wait..."
+        menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        status.text = "Copying game files (can take a few minutes), please wait..."
+        menu.addArrangedSubview(status)
         DispatchQueue.global(qos: .userInitiated).async {
             let ok = url.startAccessingSecurityScopedResource()
             defer { if ok { url.stopAccessingSecurityScopedResource() } }
-            var err: Error?
-            // Coordinate so iCloud-backed folders are downloaded first.
+            var msg = ""
             var coordErr: NSError?
             NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordErr) { u in
-                do { try GameStore.shared.importFolder(u) { _ in } } catch { err = error }
+                do { let g = try GameStore.shared.importFolder(u); msg = "Imported \(g.title)." }
+                catch { msg = "Import failed: \(error.localizedDescription)" }
             }
-            if let coordErr = coordErr { err = coordErr }
+            if let coordErr = coordErr { msg = "Import failed: \(coordErr.localizedDescription)" }
             DispatchQueue.main.async {
-                if let err = err {
-                    self.status.text = "Import failed: \(err.localizedDescription)"
-                    self.button.isHidden = false
-                } else {
-                    self.startIfPossible()
-                }
+                self.showMenu()
+                self.status.text = msg + "\n" + (self.status.text ?? "")
             }
         }
     }
 
-    private func launch(root: URL) {
-        status.isHidden = true
-        button.isHidden = true
+    // MARK: game
+    private func launch(_ game: GameDef) {
+        guard let root = GameStore.shared.findRoot(game) else { showMenu(); return }
+        current = game
+        menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let store = GameStore.shared
         let cfg = WKWebViewConfiguration()
         cfg.setURLSchemeHandler(GameSchemeHandler(root: root), forURLScheme: "ada")
@@ -86,9 +116,14 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.userContentController.add(self, name: "ada")
 
-        let manifest = store.manifest(root: root)
-        let saves = store.loadSaves()
-        let boot: [String: Any] = ["manifest": manifest, "saves": saves]
+        let boot: [String: Any] = [
+            "manifest": store.manifest(root: root),
+            "saves": store.loadSaves(game),
+            "fsPrefix": game.fsPrefix,
+            "dataPath": game.dataPath,
+            "desktopProcess": game.desktopProcess,
+            "gameId": game.id,
+        ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"
         if let u = Bundle.main.url(forResource: "shim", withExtension: "js"),
@@ -112,22 +147,19 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
         webView = wv
-        wv.load(URLRequest(url: URL(string: "ada://game/index.html")!))
+        wv.load(URLRequest(url: URL(string: "ada://game/\(game.entry)")!))
     }
 
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let d = message.body as? [String: Any], let op = d["op"] as? String else { return }
         let store = GameStore.shared
         switch op {
-        case "put": if let k = d["key"] as? String, let s = d["data"] as? String { store.putSave(key: k, data: s) }
-        case "del": if let k = d["key"] as? String { store.delSave(key: k) }
+        case "put": if let g = current, let k = d["key"] as? String, let s = d["data"] as? String { store.putSave(g, key: k, data: s) }
+        case "del": if let g = current, let k = d["key"] as? String { store.delSave(g, key: k) }
         case "log": appendLog((d["msg"] as? String) ?? "")
-        case "quit": break // iOS apps do not self-terminate
-        case "reimport":
-            try? FileManager.default.removeItem(at: store.importDir)
-            webView?.removeFromSuperview(); webView = nil
-            status.isHidden = false
-            startIfPossible()
+        case "quit", "menu":
+            // Give pending save messages a moment, then return to the launcher.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.showMenu() }
         default: break
         }
     }
@@ -137,7 +169,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     private static var logStarted = false
     private func appendLog(_ msg: String) {
         let url = GameStore.shared.docs.appendingPathComponent("AlabasterDawn.log")
-        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] [\(current?.id ?? "-")] \(msg)\n"
         Self.logQueue.async {
             if !Self.logStarted {
                 Self.logStarted = true

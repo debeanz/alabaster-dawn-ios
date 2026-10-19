@@ -1,29 +1,49 @@
 import Foundation
 
-/// Locates the imported game folder (the one holding index.html + dist/bundle.js),
-/// builds the file manifest the JS shim needs, and persists save files.
+struct GameDef {
+    let id: String
+    let title: String
+    let markers: [String]          // files that must exist under the game root
+    let installSubdir: String      // folder inside the PC install that is the web root
+    let entry: String              // page to load, relative to the root
+    let fsPrefix: String           // path prefix the game's fs calls use for files under the root
+    let dataPath: String           // what nw.App.dataPath returns
+    let desktopProcess: Bool       // CrossCode needs a `process` object; Alabaster Dawn must not have one
+}
+
+enum Games {
+    static let all: [GameDef] = [
+        GameDef(id: "alabaster", title: "Alabaster Dawn", markers: ["index.html", "dist/bundle.js"],
+                installSubdir: "terra", entry: "index.html", fsPrefix: "", dataPath: "/data", desktopProcess: false),
+        GameDef(id: "crosscode", title: "CrossCode", markers: ["node-webkit.html", "js/game.compiled.js"],
+                installSubdir: "assets", entry: "node-webkit.html", fsPrefix: "assets/", dataPath: "/saves/Default", desktopProcess: true),
+    ]
+}
+
+/// Locates game folders (bundled in the .app by tools/make-full-ipa.ps1, imported, or dropped into Documents),
+/// builds the file manifest the JS shim needs, and persists save files per game.
 final class GameStore {
     static let shared = GameStore()
     let fm = FileManager.default
     var docs: URL { fm.urls(for: .documentDirectory, in: .userDomainMask)[0] }
     var importDir: URL { docs.appendingPathComponent("Game", isDirectory: true) }
-    var savesDir: URL {
-        let u = docs.appendingPathComponent("SaveData", isDirectory: true)
+
+    func savesDir(_ g: GameDef) -> URL {
+        let u = docs.appendingPathComponent("SaveData/\(g.id)", isDirectory: true)
         try? fm.createDirectory(at: u, withIntermediateDirectories: true)
         return u
     }
 
-    private func isGameRoot(_ u: URL) -> Bool {
-        fm.fileExists(atPath: u.appendingPathComponent("index.html").path) &&
-        fm.fileExists(atPath: u.appendingPathComponent("dist/bundle.js").path)
+    private func isRoot(_ u: URL, _ g: GameDef) -> Bool {
+        g.markers.allSatisfy { fm.fileExists(atPath: u.appendingPathComponent($0).path) }
     }
 
-    /// Looks in Documents (depth <= 3) so both in-app import and Files/iTunes drag-in work.
-    func findRoot() -> URL? {
-        // Game injected into the .app by tools/make-full-ipa.ps1 takes priority.
-        if let b = Bundle.main.resourceURL?.appendingPathComponent("Game/terra"), isGameRoot(b) { return b }
+    func findRoot(_ g: GameDef) -> URL? {
+        if let b = Bundle.main.resourceURL?.appendingPathComponent("Game/\(g.id)"), isRoot(b, g) { return b }
+        let imported = importDir.appendingPathComponent(g.id)
+        if isRoot(imported, g) { return imported }
         func search(_ dir: URL, _ depth: Int) -> URL? {
-            if isGameRoot(dir) { return dir }
+            if isRoot(dir, g) { return dir }
             if depth == 0 { return nil }
             let kids = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
             for k in kids where (try? k.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
@@ -35,24 +55,26 @@ final class GameStore {
         return search(docs, 3)
     }
 
-    /// Accepts the picked folder: either the install dir (contains terra/) or terra itself.
-    func importFolder(_ picked: URL, progress: (String) -> Void) throws {
-        let src: URL
-        if isGameRoot(picked) { src = picked }
-        else if isGameRoot(picked.appendingPathComponent("terra")) { src = picked.appendingPathComponent("terra") }
-        else {
-            throw NSError(domain: "ada", code: 1, userInfo: [NSLocalizedDescriptionKey:
-                "That folder has no terra/index.html + terra/dist/bundle.js. Pick the Alabaster Dawn folder (or its terra folder)."])
+    func available() -> [GameDef] { Games.all.filter { findRoot($0) != nil } }
+
+    /// Accepts the picked folder: a PC install dir, or the web-root folder itself. Returns the imported game.
+    func importFolder(_ picked: URL) throws -> GameDef {
+        for g in Games.all {
+            let src: URL
+            if isRoot(picked, g) { src = picked }
+            else if isRoot(picked.appendingPathComponent(g.installSubdir), g) { src = picked.appendingPathComponent(g.installSubdir) }
+            else { continue }
+            let dst = importDir.appendingPathComponent(g.id, isDirectory: true)
+            try? fm.removeItem(at: dst)
+            try fm.createDirectory(at: importDir, withIntermediateDirectories: true)
+            try fm.copyItem(at: src, to: dst)
+            return g
         }
-        let dst = importDir.appendingPathComponent("terra", isDirectory: true)
-        try? fm.removeItem(at: importDir)
-        try fm.createDirectory(at: importDir, withIntermediateDirectories: true)
-        progress("Copying game files (~600 MB)...")
-        try fm.copyItem(at: src, to: dst)
-        try? fm.removeItem(at: dst.appendingPathComponent("greenworks/lib"))
+        throw NSError(domain: "ada", code: 1, userInfo: [NSLocalizedDescriptionKey:
+            "No Alabaster Dawn (terra) or CrossCode (assets) game folder found there."])
     }
 
-    /// Relative file paths under root, for the sync existsSync() the audio loader uses.
+    /// Relative file paths under root, for the sync existsSync()/lstatSync() the games use.
     func manifest(root: URL) -> [String] {
         var out: [String] = []
         let base = root.standardizedFileURL.path
@@ -68,18 +90,18 @@ final class GameStore {
     }
 
     // MARK: saves (keyed by normalized virtual path)
-    private func fileFor(_ key: String) -> URL {
+    private func fileFor(_ g: GameDef, _ key: String) -> URL {
         let enc = key.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "x"
-        return savesDir.appendingPathComponent(enc)
+        return savesDir(g).appendingPathComponent(enc)
     }
-    func putSave(key: String, data: String) {
-        try? data.data(using: .utf8)?.write(to: fileFor(key), options: .atomic)
+    func putSave(_ g: GameDef, key: String, data: String) {
+        try? data.data(using: .utf8)?.write(to: fileFor(g, key), options: .atomic)
     }
-    func delSave(key: String) { try? fm.removeItem(at: fileFor(key)) }
+    func delSave(_ g: GameDef, key: String) { try? fm.removeItem(at: fileFor(g, key)) }
 
-    func loadSaves() -> [String: [String: Any]] {
+    func loadSaves(_ g: GameDef) -> [String: [String: Any]] {
         var out: [String: [String: Any]] = [:]
-        let files = (try? fm.contentsOfDirectory(at: savesDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let files = (try? fm.contentsOfDirectory(at: savesDir(g), includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         for f in files {
             guard let key = f.lastPathComponent.removingPercentEncoding,
                   let s = try? String(contentsOf: f, encoding: .utf8) else { continue }
