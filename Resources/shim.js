@@ -49,6 +49,16 @@
     }, 8000);
   });
 
+  // WebKit has no navigator.keyboard; the engine calls getLayoutMap() unguarded.
+  if (!navigator.keyboard) {
+    try {
+      Object.defineProperty(navigator, 'keyboard', { configurable: true, value: {
+        getLayoutMap: function () { return Promise.resolve(new Map()); },
+        lock: function () { return Promise.resolve(); }, unlock: function () {}
+      } });
+    } catch (e) {}
+  }
+
   // ---------- viewport / page CSS ----------
   var head = document.documentElement;
   var meta = document.createElement('meta');
@@ -309,7 +319,11 @@
       hide.style.opacity = overlayVisible ? 1 : 0.4;
     }, { passive: false });
 
-    function sync() { root.style.display = hasReal ? 'none' : ''; requestAnimationFrame(sync); }
+    function sync() {
+      try { hasReal = [].slice.call(realGetGamepads()).some(function (g) { return g && g.connected; }); } catch (e) {}
+      root.style.display = hasReal ? 'none' : '';
+      setTimeout(sync, 300);
+    }
     sync();
   }
   document.addEventListener('DOMContentLoaded', buildOverlay);
