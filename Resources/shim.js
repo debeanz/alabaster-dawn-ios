@@ -65,6 +65,15 @@
   var meta = document.createElement('meta');
   meta.name = 'viewport';
   meta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover';
+  // CrossCode's page ships "initial-scale=0.5", which doubles the CSS window size and breaks its
+  // Fit/Stretch maths; rewrite any page viewport tag the moment the parser inserts it.
+  new MutationObserver(function (muts) {
+    muts.forEach(function (m) {
+      [].forEach.call(m.addedNodes, function (n) {
+        if (n.tagName === 'META' && n.name === 'viewport' && n !== meta) n.content = meta.content;
+      });
+    });
+  }).observe(document.documentElement, { childList: true, subtree: true });
   document.addEventListener('DOMContentLoaded', function () {
     [].forEach.call(document.querySelectorAll('meta[name=viewport]'), function (m) { m.remove(); });
     document.head.appendChild(meta);
@@ -122,7 +131,7 @@
   function readFileData(p) {
     var n = norm(p);
     if (saves[n]) return Promise.resolve(saves[n].data);
-    if (files[n]) return fetch('ada://game/' + n.slice(PFX.length).split('/').map(encodeURIComponent).join('/'))
+    if (files[n]) return fetch(n.slice(PFX.length).split('/').map(encodeURIComponent).join('/'))
       .then(function (r) { return r.text(); });
     return Promise.reject(enoent(p));
   }
@@ -244,13 +253,76 @@
     P.prototype = Orig.prototype; P.__ada = true;
     window[nm] = P;
   });
+  // Ogg Vorbis fallback: WebKit on iOS may not decode Vorbis, and both games ship only .ogg audio.
+  // Alabaster Dawn never finishes booting when a decode fails (black screen). Try WebKit's decoder
+  // first; after the first Ogg failure, decode Ogg with the bundled WASM decoder in worker threads.
+  (function () {
+    var BAC = window.BaseAudioContext || window.AudioContext || window.webkitAudioContext;
+    var OV = window['ogg-vorbis-decoder'];
+    if (!BAC || !BAC.prototype.decodeAudioData || !OV) return;
+    var nativeDecode = BAC.prototype.decodeAudioData;
+    var nativeOggBroken = !!window.__ADA_FORCE_WASM_OGG, pool = [], next = 0, okCount = 0, failCount = 0;
+    function decoder() {
+      if (!pool.length) {
+        for (var i = 0; i < 3; i++) {
+          try { pool.push({ d: new OV.OggVorbisDecoderWebWorker(), q: Promise.resolve() }); }
+          catch (e) { if (!pool.length) pool.push({ d: new OV.OggVorbisDecoder(), q: Promise.resolve() }); break; }
+        }
+      }
+      return pool[next++ % pool.length];
+    }
+    function wasmDecode(ctx, bytes) {
+      var slot = decoder();
+      var job = slot.q.then(function () { return slot.d.ready; })
+        .then(function () { return slot.d.decodeFile(bytes); })
+        .then(function (r) { return slot.d.reset().then(function () { return r; }); });
+      slot.q = job.catch(noop);
+      return job.then(function (r) {
+        if (!r || !r.samplesDecoded || !r.channelData.length) throw new Error('empty vorbis decode');
+        var buf = ctx.createBuffer(r.channelData.length, r.samplesDecoded, r.sampleRate);
+        for (var c = 0; c < r.channelData.length; c++) buf.getChannelData(c).set(r.channelData[c].subarray(0, r.samplesDecoded));
+        return buf;
+      });
+    }
+    function isOgg(b) { return b.length > 4 && b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53; }
+    BAC.prototype.decodeAudioData = function (data, ok, err) {
+      var ctx = this, bytes = new Uint8Array(data);
+      var p;
+      if (!isOgg(bytes)) {
+        p = nativeDecode.call(ctx, data);
+      } else if (nativeOggBroken) {
+        p = wasmDecode(ctx, bytes.slice());
+      } else {
+        var copy = bytes.slice();
+        p = Promise.resolve().then(function () { return nativeDecode.call(ctx, data); }).catch(function (e) {
+          if (!nativeOggBroken) { nativeOggBroken = true; log('WebKit cannot decode Ogg (' + e + '), using WASM Vorbis decoder'); }
+          return wasmDecode(ctx, copy);
+        });
+      }
+      p = p.then(function (b) { okCount++; return b; }, function (e) {
+        if (++failCount <= 5) log('audio decode failed: ' + e);
+        throw e;
+      });
+      p.then(function (b) { ok && ok(b); }, function (e) { err && err(e); });
+      return p;
+    };
+    window.__adaAudioStats = function () { return { ok: okCount, fail: failCount, wasm: nativeOggBroken }; };
+  })();
+
   var suspended = false;
   function resumeAll() { ctxs.forEach(function (c) { if (c.state !== 'running') c.resume().catch(noop); }); }
   ['touchstart', 'touchend', 'pointerdown', 'click', 'keydown'].forEach(function (ev) {
     window.addEventListener(ev, function () { if (!suspended) resumeAll(); }, true);
   });
-  window.__adaSuspend = function () { suspended = true; ctxs.forEach(function (c) { c.suspend().catch(noop); }); };
-  window.__adaResume = function () { suspended = false; resumeAll(); };
+  // Both engines pause while the window is unfocused (Alabaster Dawn shows a black screen), and a
+  // WKWebView often never receives window focus. Report focus at all times except while the app is in
+  // the background (the native side calls __adaSuspend/__adaResume).
+  document.hasFocus = function () { return !suspended; };
+  window.addEventListener('blur', function (e) { if (!suspended) e.stopImmediatePropagation(); }, true);
+  function kickFocus() { if (!suspended) window.dispatchEvent(new Event('focus')); }
+  window.addEventListener('load', function () { kickFocus(); setInterval(kickFocus, 2000); });
+  window.__adaSuspend = function () { suspended = true; window.dispatchEvent(new Event('blur')); ctxs.forEach(function (c) { c.suspend().catch(noop); }); };
+  window.__adaResume = function () { suspended = false; resumeAll(); kickFocus(); };
 
   // ---------- virtual gamepad + touch overlay ----------
   var vpad = {
@@ -284,7 +356,8 @@
   var nativeW = Math.round(Math.max(screen.width, screen.height) * dpr);
   var nativeH = Math.round(Math.min(screen.width, screen.height) * dpr);
   // Alabaster Dawn: "Native" entry of the patched Resolution list (render scale vs. the 640x360 base).
-  window.__adaNativeScale = Math.min(4, Math.round(nativeH / 360 * 100) / 100);
+  // Multiple of 1/40 so 640*s x 360*s stays a whole-pixel framebuffer (e.g. 1179 lines -> 2096x1179).
+  window.__adaNativeScale = Math.min(4, Math.floor(nativeH / 9) / 40);
 
   var aspectMode = 'fit';
   function applyAspect() {
@@ -293,7 +366,7 @@
     if (!st) return;
     if (aspectMode !== 'fill') { st.textContent = ''; return; }
     st.textContent = 'canvas.xgCanvas,#game canvas{position:fixed!important;left:0!important;top:0!important;width:100vw!important;' +
-      'height:100vh!important;margin:0!important;transform:none!important;max-width:none!important;max-height:none!important}';
+      'height:100vh!important;object-fit:fill!important;margin:0!important;transform:none!important;max-width:none!important;max-height:none!important}';
   }
   document.addEventListener('DOMContentLoaded', function () { applyAspect(); setInterval(applyAspect, 1000); });
   window.addEventListener('resize', applyAspect);
@@ -320,19 +393,52 @@
 
   if (boot.gameId === 'crosscode') {
     // Patched "Resolution" option: logical game size = resolution / integer pixel scale (CrossCode needs >= 320 lines).
+    // Wider resolutions give a wider view of the world; applied live and again on the next launch.
     var RES = [[nativeW, nativeH], [2106, 1084], [1920, 1080], [1600, 900], [1280, 720]];
-    var r = RES[settings['ada-resolution']] || RES[0];
-    var s = Math.max(1, Math.min(4, Math.floor(r[1] / 320)));
-    var fixed = { IG_WIDTH: Math.round(r[0] / s), IG_HEIGHT: Math.round(r[1] / s), IG_GAME_SCALE: s };
-    Object.keys(fixed).forEach(function (k) {
+    var fixed = {};
+    var applyRes = function (v) {
+      var r = RES[v] || RES[0];
+      var s = Math.max(1, Math.min(4, Math.floor(r[1] / 320)));
+      fixed.IG_WIDTH = Math.round(r[0] / s); fixed.IG_HEIGHT = Math.round(r[1] / s); fixed.IG_GAME_SCALE = s;
+      log('crosscode logical ' + fixed.IG_WIDTH + 'x' + fixed.IG_HEIGHT + ' x' + s);
+    };
+    // The title-screen artwork is 568x320. At wider resolutions, scale it up to cover the screen
+    // (cropping a little) instead of leaving black bars on the right.
+    var titleFix = setInterval(function () {
+      if (!(window.ig && ig.ParallaxGui && ig.ParallaxGui.inject)) return;
+      clearInterval(titleFix);
+      ig.ParallaxGui.inject({
+        init: function (b, a) {
+          this.parent(b, a);
+          this.adaTitle = !!(b && b.parallax === 'title');
+        },
+        update: function () {
+          if (this.adaTitle) {
+            // The GUI system scales a hook and its whole subtree by currentState.scaleX/Y around hook.pivot.
+            var W = ig.system.width, H = ig.system.height, k = Math.max(W / 568, H / 320, 1);
+            this.hook.size.x = Math.ceil(W / k); this.hook.size.y = Math.ceil(H / k);
+            this.hook.pivot.x = 0; this.hook.pivot.y = 0;
+            this.hook.currentState.scaleX = k; this.hook.currentState.scaleY = k;
+          }
+          this.parent();
+        }
+      });
+    }, 20);
+    var curRes = typeof settings['ada-resolution'] === 'number' ? settings['ada-resolution'] : 0;
+    applyRes(curRes);
+    ['IG_WIDTH', 'IG_HEIGHT', 'IG_GAME_SCALE'].forEach(function (k) {
       Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
     });
-    log('crosscode logical ' + fixed.IG_WIDTH + 'x' + fixed.IG_HEIGHT + ' x' + s);
     setInterval(function () {
       try {
         var v = window.sc && sc.options && sc.options.values && sc.options.values['ada-resolution'];
-        if (typeof v === 'number') saveSetting('ada-resolution', v);
-      } catch (e) {}
+        if (typeof v !== 'number' || v === curRes) return;
+        curRes = v; saveSetting('ada-resolution', v); applyRes(v);
+        if (window.ig && ig.system) {
+          ig.system.resize(fixed.IG_WIDTH, fixed.IG_HEIGHT, fixed.IG_GAME_SCALE);
+          sc.options._setDisplaySize();
+        }
+      } catch (e) { log('resolution change failed: ' + e); }
     }, 500);
   }
   function patched() {

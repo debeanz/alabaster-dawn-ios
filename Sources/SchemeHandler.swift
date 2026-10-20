@@ -54,8 +54,8 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
 
     private func mime(_ ext: String) -> String {
         switch ext.lowercased() {
-        case "html": return "text/html"
-        case "js": return "text/javascript"
+        case "html": return "text/html; charset=utf-8"
+        case "js": return "text/javascript; charset=utf-8"
         case "css": return "text/css"
         case "json": return "application/json"
         case "png": return "image/png"

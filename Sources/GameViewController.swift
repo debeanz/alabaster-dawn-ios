@@ -14,7 +14,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     private var padFrames = 0
     /// Per-game display settings mirrored from the in-game options (resolution, screen scaling).
     private func settings(_ id: String) -> [String: Any] {
-        UserDefaults.standard.dictionary(forKey: "settings.(id)") ?? [:]
+        UserDefaults.standard.dictionary(forKey: "settings.\(id)") ?? [:]
     }
 
     override var prefersStatusBarHidden: Bool { true }
@@ -143,8 +143,10 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"
-        if let u = Bundle.main.url(forResource: "shim", withExtension: "js"),
-           let s = try? String(contentsOf: u, encoding: .utf8) { src += s }
+        for name in ["ogg-vorbis-decoder", "shim"] {
+            if let u = Bundle.main.url(forResource: name, withExtension: "js"),
+               let s = try? String(contentsOf: u, encoding: .utf8) { src += s + "\n" }
+        }
         cfg.userContentController.addUserScript(WKUserScript(source: src, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         let wv = WKWebView(frame: .zero, configuration: cfg)
@@ -180,7 +182,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         case "setting":
             if let g = current, let k = d["key"] as? String, let val = d["value"] {
                 var s = settings(g.id); s[k] = val
-                UserDefaults.standard.set(s, forKey: "settings.(g.id)")
+                UserDefaults.standard.set(s, forKey: "settings.\(g.id)")
             }
         case "log": appendLog((d["msg"] as? String) ?? "")
         case "quit", "menu":
@@ -219,13 +221,13 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             let b = btns.map { String(format: "%.2f", $0?.value ?? 0) }.joined(separator: ",")
             let a = [gp.leftThumbstick.xAxis.value, -gp.leftThumbstick.yAxis.value,
                      gp.rightThumbstick.xAxis.value, -gp.rightThumbstick.yAxis.value].map { String(format: "%.2f", $0) }.joined(separator: ",")
-            json = "{\"c\":1,\"b\":[(b)],\"a\":[(a)]}"
+            json = "{\"c\":1,\"b\":[\(b)],\"a\":[\(a)]}"
         }
         // Resend every ~0.5s too: the first sends can land before the page (and the shim) exists.
         padFrames += 1
         if json == lastPad && padFrames % 30 != 0 { return }
         lastPad = json
-        wv.evaluateJavaScript("window.__adaN&&window.__adaN((json))")
+        wv.evaluateJavaScript("window.__adaN&&window.__adaN(\(json))")
     }
 
     @objc private func appInactive() { webView?.evaluateJavaScript("window.__adaSuspend && window.__adaSuspend()") }
