@@ -18,7 +18,7 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
     private static let adPixelOld = #""type":{"default":1,"list":[{"en_US":"640x360","langID":171},{"en_US":"1280x720","langID":172},{"en_US":"1920x1080","langID":173},{"en_US":"2560x1440","langID":203},{"en_US":"4096x2160","langID":204}],"type":"RADIO_GROUP"}"#
     private static let adPixelNew = #""type":{"default":1,"list":[{"en_US":"640x360","langID":171},{"en_US":"1280x720","langID":172},{"en_US":"1920x1080","langID":173}],"type":"RADIO_GROUP"}"#
     private static let adAspect = #""screen-aspect":{"debug":false,"description":{"en_US":"Width of the game view. Full Screen and 1.943:1 show more of the world to the sides (not a stretch).\n\n{c:3}Restart the game to apply{c} (home button, then start again)."},"hidden":false,"label":{"en_US":"Aspect Ratio"},"local":true,"type":{"default":1,"list":[{"en_US":"16:9"},{"en_US":"Full Screen"},{"en_US":"1.943:1"}],"type":"RADIO_GROUP"},"category":"GRAPHICS"},"#
-    private static let adFps = #""frame-rate":{"debug":false,"description":{"en_US":"Frame rate limit. 120 FPS needs a ProMotion display and a scene light enough to render that fast."},"hidden":false,"label":{"en_US":"Frame Rate"},"local":true,"type":{"default":0,"list":[{"en_US":"60 FPS"},{"en_US":"120 FPS"}],"type":"RADIO_GROUP"},"category":"GRAPHICS"},"show-fps":{"debug":false,"description":{"en_US":"Shows the current frame rate in the top-left corner."},"hidden":false,"inset":true,"label":{"en_US":"Show FPS"},"local":true,"type":{"default":false,"type":"CHECKBOX"},"category":"GRAPHICS"},"#
+    private static let adFps = #""show-fps":{"debug":false,"description":{"en_US":"Shows the current frame rate in the top-left corner."},"hidden":false,"inset":true,"label":{"en_US":"Show FPS"},"local":true,"type":{"default":false,"type":"CHECKBOX"},"category":"GRAPHICS"},"#
     private static let adResHidden = (#""hidden":false,"label":{"en_US":"Resolution","langID":170}"#, #""hidden":true,"label":{"en_US":"Resolution","langID":170}"#)
     private static let ccPixelSizeDef = #""pixel-size":{type:"BUTTON_GROUP",data:sc.PIXEL_SIZE,init:sc.PIXEL_SIZE.TWO,cat:sc.OPTION_CATEGORY.VIDEO},"#
     private static let ccFpsDef = #""ada-frame-rate":{type:"BUTTON_GROUP",data:{FPS60:0,FPS120:1},init:0,cat:sc.OPTION_CATEGORY.VIDEO},"ada-show-fps":{type:"CHECKBOX",init:false,cat:sc.OPTION_CATEGORY.VIDEO},"#
@@ -39,13 +39,16 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
             if let r = str.range(of: #""fullscreen":{"#) { str.insert(contentsOf: Self.adAspect + Self.adScaling + Self.adFps, at: r.lowerBound) }
             out = str.data(using: .utf8) ?? data
         } else if gameId == "alabaster", rel == "dist/bundle.js", var str = String(data: data, encoding: .utf8) {
-            // Render scale relative to the 640x360 base, matching the list above (the stock 2560x1440 and
-            // 4096x2160 entries are removed: their framebuffers crash WebKit on iPhone).
+            // Render scale relative to the 640x360 base. The shim pins index 1 (1.25x) for frame rate and memory;
+            // larger scales ran below 60 fps or were killed by iOS for memory.
             // View width chosen by the Aspect Ratio option (the shim sets __adaScreenWidth before the game runs).
             str = str.replacingOccurrences(of: "system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = 640;",
                                            with: "system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = (window.__adaScreenWidth || 640);")
+            // Expose the atlas manager so the shim can log atlas fill (diagnostics only).
+            str = str.replacingOccurrences(of: "game_config/* GAME_CONF */.a.TRI_INIT = function (weltmeister) {",
+                                           with: "game_config/* GAME_CONF */.a.TRI_INIT = function (weltmeister) { window.__adaAtlasMgr = atlas_manager/* g_atlasManager */.vH;")
             str = str.replacingOccurrences(of: "const RESOLUTION_MAP = [1, 2, 3, 4, 6];",
-                                           with: "const RESOLUTION_MAP = [1, 2, 3];")
+                                           with: "const RESOLUTION_MAP = [1, 1.25, 2];")
             out = str.data(using: .utf8) ?? data
         } else if gameId == "crosscode", rel == "js/game.compiled.js", var str = String(data: data, encoding: .utf8) {
             str = str.replacingOccurrences(of: Self.ccDefAnchor, with: Self.ccResDef + Self.ccFpsDef + Self.ccDefAnchor)

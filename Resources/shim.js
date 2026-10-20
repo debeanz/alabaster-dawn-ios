@@ -350,9 +350,74 @@
         return wasmDecode(ctx, copy);
       });
     }
+    // Alabaster Dawn: on-demand audio. The game decodes ~620 sounds at boot and keeps them all, which
+    // (with its large data) pushes the page past iOS's memory limit. Hand the game a lightweight
+    // stand-in with the real duration/length, keep only the compressed bytes, and decode into a small
+    // most-recently-used cache when a sound is played (or set as reverb).
+    var LAZY = boot.gameId === 'alabaster';
+    var LRU_MAX = 32 * 1048576, lru = new Map(), lruBytes = 0, compressedBytes = 0, lazyDecodes = 0;
+    function FakeBuffer(real, bytes, ctx) {
+      this.duration = real.duration; this.length = real.length; this.sampleRate = real.sampleRate;
+      this.numberOfChannels = real.numberOfChannels; this._bytes = bytes; this._ctx = ctx; this._pending = null;
+    }
+    FakeBuffer.prototype.getChannelData = function (c) { var r = lru.get(this); return r ? r.getChannelData(c) : new Float32Array(this.length); };
+    function lruPut(fake, real) {
+      if (lru.has(fake)) { lru.delete(fake); } else { lruBytes += real.length * real.numberOfChannels * 4; }
+      lru.set(fake, real);
+      while (lruBytes > LRU_MAX && lru.size > 1) {
+        var oldest = lru.keys().next().value, ob = lru.get(oldest);
+        lru.delete(oldest); lruBytes -= ob.length * ob.numberOfChannels * 4;
+      }
+    }
+    function realNow(fake) { var r = lru.get(fake); if (r) lruPut(fake, r); return r || null; }
+    function realLater(fake) {
+      if (!fake._pending) {
+        lazyDecodes++;
+        fake._pending = runQueued(function () { return decodeOne(fake._ctx, fake._bytes.slice(0)); }).then(function (r) {
+          fake._pending = null; lruPut(fake, r); return r;
+        }, function (e) { fake._pending = null; throw e; });
+      }
+      return fake._pending;
+    }
+    window.__adaIsFakeBuffer = function (b) { return b instanceof FakeBuffer; };
+    function hookBufferProp(Node, label) {
+      var d = Node && Object.getOwnPropertyDescriptor(Node.prototype, 'buffer');
+      if (!d || !d.set) return;
+      Object.defineProperty(Node.prototype, 'buffer', {
+        configurable: true, enumerable: d.enumerable,
+        get: function () { return this._adaFake || d.get.call(this); },
+        set: function (b) {
+          if (!(b instanceof FakeBuffer)) { this._adaFake = null; return d.set.call(this, b); }
+          this._adaFake = b;
+          // Assign the real buffer through the outermost setter (the reverb resampler wraps this one).
+          var r = realNow(b), node = this;
+          if (r) { node.buffer = r; node._adaFake = b; return; }
+          realLater(b).then(function (real) {
+            if (node._adaFake === b) {
+              try { node.buffer = real; node._adaFake = b; } catch (e) { log(label + ' late buffer failed: ' + e); }
+            }
+          }, function (e) { log(label + ' lazy decode failed: ' + e); });
+        }
+      });
+    }
+    if (LAZY) {
+      // The convolver hook (reverb resampling, below) wraps this one, so stand-ins become real first.
+      hookBufferProp(window.AudioBufferSourceNode, 'source');
+      hookBufferProp(window.ConvolverNode, 'reverb');
+    }
     BAC.prototype.decodeAudioData = function (data, ok, err) {
       var ctx = this;
+      // Keep a compressed copy before decoding (decoding detaches the caller's ArrayBuffer).
+      var keep = LAZY && data && data.byteLength ? data.slice(0) : null;
       var p = runQueued(function () { return decodeOne(ctx, data); });
+      if (keep) {
+        p = p.then(function (real) {
+          compressedBytes += keep.byteLength;
+          var fake = new FakeBuffer(real, keep, ctx);
+          lruPut(fake, real);
+          return fake;
+        });
+      }
       p = p.then(function (b) {
         okCount++;
         if (b) {
@@ -369,7 +434,8 @@
       return p;
     };
     window.__adaAudioStats = function () {
-      return { ok: okCount, fail: failCount, wasm: nativeOggBroken, mb: Math.round(pcmBytes / 1048576), queued: waiting.length };
+      return { ok: okCount, fail: failCount, wasm: nativeOggBroken, mb: Math.round(pcmBytes / 1048576), queued: waiting.length,
+        lazy: LAZY ? ' cache=' + Math.round(lruBytes / 1048576) + 'MB/' + lru.size + ' ogg=' + Math.round(compressedBytes / 1048576) + 'MB ondemand=' + lazyDecodes : '' };
     };
   })();
 
@@ -392,7 +458,7 @@
       set: function (b) {
         try {
           var rate = this.context.sampleRate;
-          if (b && b.sampleRate !== rate) {
+          if (b && b.sampleRate !== rate && !(window.__adaIsFakeBuffer && window.__adaIsFakeBuffer(b))) {
             var r = cache.get(b);
             if (!r) {
               var ratio = b.sampleRate / rate, len = Math.max(1, Math.round(b.length / ratio));
@@ -425,7 +491,7 @@
   document.hasFocus = function () { return !suspended; };
   window.addEventListener('blur', function (e) { if (!suspended) e.stopImmediatePropagation(); }, true);
   function kickFocus() { if (!suspended) window.dispatchEvent(new Event('focus')); }
-  window.addEventListener('load', function () { kickFocus(); setInterval(kickFocus, 2000); });
+  window.addEventListener('load', function () { kickFocus(); setTimeout(kickFocus, 1500); });
   window.__adaSuspend = function () { suspended = true; window.dispatchEvent(new Event('blur')); ctxs.forEach(function (c) { c.suspend().catch(noop); }); };
   window.__adaResume = function () { suspended = false; resumeAll(); kickFocus(); };
 
@@ -493,7 +559,7 @@
     try {
       parts.push('vis=' + document.visibilityState + (suspended ? '/suspended' : ''));
       var a = window.__adaAudioStats && __adaAudioStats();
-      if (a) parts.push('audio ok=' + a.ok + ' queued=' + a.queued + ' fail=' + a.fail + ' wasm=' + a.wasm + ' pcm=' + a.mb + 'MB');
+      if (a) parts.push('audio ok=' + a.ok + ' queued=' + a.queued + ' fail=' + a.fail + ' wasm=' + a.wasm + ' decoded=' + a.mb + 'MB' + a.lazy);
       parts.push('ctx=' + ctxs.map(function (c) { return c.state; }).join(','));
       var c = document.querySelector('canvas');
       if (c) parts.push('canvas=' + c.width + 'x' + c.height + ' css=' + c.clientWidth + 'x' + c.clientHeight);
@@ -537,8 +603,11 @@
   window.__adaNativeScale = Math.min(4, Math.floor(nativeH / 9) / 40);
 
   var aspectMode = 'fit';
+  var lastAspectCss = null;
   function applyAspect() {
     var st = document.getElementById('__ada_aspect');
+    if (st && lastAspectCss === aspectMode) return;
+    lastAspectCss = aspectMode;
     if (!st && document.head) { st = document.createElement('style'); st.id = '__ada_aspect'; document.head.appendChild(st); }
     if (!st) return;
     if (aspectMode !== 'fill') { st.textContent = ''; return; }
@@ -566,13 +635,14 @@
   }
 
   if (boot.gameId === 'alabaster') {
-    var AD_KEYS = ['screen-scaling', 'screen-aspect', 'frame-rate', 'show-fps'];
+    var AD_KEYS = ['screen-scaling', 'screen-aspect', 'show-fps'];
     // Seed the engine's local options from the native copy, and drop out-of-range values.
     try {
       var lo = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
       AD_KEYS.forEach(function (k) { if (settings[k] !== undefined) lo[k] = settings[k]; });
-      // Render at 720 lines (2x the 360-line base; the Resolution option is hidden). 1080 lines
-      // (2340x1080) exceeded the memory iOS allows the page and the game was killed during boot.
+      // Render at 450 lines (1.25x the 360-line base; the Resolution option is hidden). The engine
+      // shades ~14 full-screen passes per frame: 720 lines ran at 30-50 fps on iPhone 15 Pro Max and
+      // 1080 lines exceeded the page memory limit. The Android port holds 60 fps at 960x540.
       lo['pixel-size'] = 1;
       if (typeof lo['show-fps'] !== 'boolean') lo['show-fps'] = !!lo['show-fps'];
       if (typeof lo['screen-aspect'] !== 'number' || lo['screen-aspect'] < 0 || lo['screen-aspect'] > 2) lo['screen-aspect'] = 1;
@@ -580,17 +650,17 @@
       aspectMode = lo['screen-scaling'] === 1 ? 'fill' : 'fit';
       var adAspect = lo['screen-aspect'];
       // Patched SYSTEM_CONF.SCREEN_WIDTH reads this at startup (base 640x360); keep it even.
-      window.__adaScreenWidth = Math.round(360 * ASPECTS[adAspect] / 2) * 2;
-      frameCap = lo['frame-rate'] === 1 ? 120 : 60; showFps = !!lo['show-fps'];
+      window.__adaScreenWidth = Math.round(360 * ASPECTS[adAspect] / 4) * 4;
+      frameCap = 60; showFps = !!lo['show-fps'];  // engine steps at a fixed 60 Hz
       log('alabaster view ' + window.__adaScreenWidth + 'x360 (' + ASPECT_NAMES[adAspect] + ') render ' +
-        window.__adaScreenWidth * (lo['pixel-size'] + 1) + 'x' + 360 * (lo['pixel-size'] + 1) + ', scaling ' + aspectMode +
+        window.__adaScreenWidth * 1.25 + 'x450' + ', scaling ' + aspectMode +
         ', cap ' + frameCap + ', showFps ' + showFps);
     } catch (e) { log('alabaster settings seed failed: ' + e); }
     setInterval(function () {
       try {
         var o = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
         AD_KEYS.forEach(function (k) { if (o[k] !== undefined && settings[k] !== o[k]) { log('option ' + k + ' -> ' + o[k]); saveSetting(k, o[k]); } });
-        frameCap = o['frame-rate'] === 1 ? 120 : 60; showFps = !!o['show-fps'];
+        showFps = !!o['show-fps'];
         var m = o['screen-scaling'] === 1 ? 'fill' : 'fit';
         if (m !== aspectMode) { aspectMode = m; applyAspect(); }
         if (typeof o['screen-aspect'] === 'number' && o['screen-aspect'] !== adAspect) {

@@ -40,7 +40,8 @@ function patch(rel, buf) {
   if (gameId === 'alabaster' && rel === 'dist/bundle.js') {
     const m = swift.match(/with: "(const RESOLUTION_MAP = .*?;)"\)/);
     return Buffer.from(buf.toString('utf8').replace('const RESOLUTION_MAP = [1, 2, 3, 4, 6];', m[1])
-      .replace('system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = 640;', 'system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = (window.__adaScreenWidth || 640);'));
+      .replace('system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = 640;', 'system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = (window.__adaScreenWidth || 640);')
+      .replace('game_config/* GAME_CONF */.a.TRI_INIT = function (weltmeister) {', 'game_config/* GAME_CONF */.a.TRI_INIT = function (weltmeister) { window.__adaAtlasMgr = atlas_manager/* g_atlasManager */.vH;'));
   }
   if (gameId === 'crosscode' && rel === 'js/game.compiled.js') {
     return Buffer.from(buf.toString('utf8').replace(raw('ccDefAnchor'), raw('ccResDef') + raw('ccFpsDef') + raw('ccDefAnchor')).replace(raw('ccPixelSizeDef'), ''));
@@ -83,7 +84,8 @@ http.createServer((req, res) => {
   if (rel === game.entry) {
     const boot = { manifest, saves, fsPrefix: game.fsPrefix, dataPath: game.dataPath, desktopProcess: game.desktopProcess, gameId, settings };
     const bridge = 'window.webkit={messageHandlers:{ada:{postMessage:function(m){navigator.sendBeacon("/__ada",JSON.stringify(m))}}}};';
-    const shim = (process.env.FORCE_WASM_OGG ? 'window.__ADA_FORCE_WASM_OGG=true;\n' : '') +
+    // HARNESS_RAF: drive frames with a timer so the game runs while the browser pane is hidden.
+    const shim = (process.env.HARNESS_RAF ? 'window.requestAnimationFrame=function(cb){return setTimeout(function(){cb(performance.now())},16)};window.cancelAnimationFrame=clearTimeout;\n' : '') + (process.env.FORCE_WASM_OGG ? 'window.__ADA_FORCE_WASM_OGG=true;\n' : '') +
       fs.readFileSync(path.join(repo, 'Resources/shim.js'), 'utf8');
     // Decoder served as an external file: inline, the HTML parser would alter its embedded WASM data.
     const inject = '<script src="/__ada_decoder.js"></script><script>' + bridge + 'window.__ADA_BOOT=' + JSON.stringify(boot) + ';\n' + shim + '</script>';
