@@ -126,23 +126,17 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         current = game
         menu.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let store = GameStore.shared
+        let manifest = store.manifest(root: root)
+        startGameLog(game, root: root, files: manifest.count)
         let cfg = WKWebViewConfiguration()
         cfg.setURLSchemeHandler(GameSchemeHandler(root: root, gameId: game.id), forURLScheme: "ada")
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.userContentController.add(self, name: "ada")
         // Let requestAnimationFrame follow the display (120 Hz on ProMotion); the in-game Frame Rate option
-        // caps it to 60 in JavaScript. Private WebKit preference: only set when this WebKit has it.
-        let rafSel = NSSelectorFromString("_setPreferPageRenderingUpdatesNear60FPSEnabled:")
-        if cfg.preferences.responds(to: rafSel) {
-            cfg.preferences.setValue(false, forKey: "preferPageRenderingUpdatesNear60FPSEnabled")
-            appendLog("120 Hz: WebKit 60 fps preference disabled (max display rate \(UIScreen.main.maximumFramesPerSecond) Hz)")
-        } else {
-            appendLog("120 Hz: WebKit preference not available, page stays at 60 fps")
-        }
+        // caps it to 60 in JavaScript.
+        unlockHighFrameRate(cfg.preferences)
 
-        let manifest = store.manifest(root: root)
-        startGameLog(game, root: root, files: manifest.count)
         // Low-memory audio only for the launch right after an out-of-memory kill.
         let lowMemory = UserDefaults.standard.bool(forKey: "lowmem.\(game.id)")
         UserDefaults.standard.removeObject(forKey: "lowmem.\(game.id)")
@@ -253,6 +247,36 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             h.seekToEndOfFile()
             if h.offsetInFile < 5_000_000 { h.write(data) }
         }
+    }
+
+    /// Turns off WebKit's "Prefer Page Rendering Updates near 60fps" feature flag (the switch Safari lists
+    /// under Feature Flags) so requestAnimationFrame can run at 120 Hz on ProMotion screens. Private API:
+    /// every step is checked first, and the result is logged.
+    private func unlockHighFrameRate(_ prefs: WKPreferences) {
+        let target = "PreferPageRenderingUpdatesNear60FPSEnabled"
+        let variants = [("_features", "_setEnabled:forFeature:"),
+                        ("_experimentalFeatures", "_setEnabled:forExperimentalFeature:"),
+                        ("_internalDebugFeatures", "_setEnabled:forInternalDebugFeature:")]
+        typealias SetFn = @convention(c) (AnyObject, Selector, Bool, AnyObject) -> Void
+        let cls: AnyObject = WKPreferences.self
+        let keySel = NSSelectorFromString("key")
+        var related: [String] = []
+        for (listName, setterName) in variants {
+            let listSel = NSSelectorFromString(listName), setSel = NSSelectorFromString(setterName)
+            guard cls.responds(to: listSel), prefs.responds(to: setSel),
+                  let list = cls.perform(listSel)?.takeUnretainedValue() as? [NSObject] else { continue }
+            for f in list where f.responds(to: keySel) {
+                guard let key = f.value(forKey: "key") as? String else { continue }
+                if key.contains("60") || key.contains("FPS") || key.lowercased().contains("framerate") { related.append(key) }
+                if key == target {
+                    let fn = unsafeBitCast(prefs.method(for: setSel), to: SetFn.self)
+                    fn(prefs, setSel, false, f)
+                    appendLog("120 Hz: turned off \(key) via \(setterName) (display max \(UIScreen.main.maximumFramesPerSecond) Hz)")
+                    return
+                }
+            }
+        }
+        appendLog("120 Hz: flag not found, page stays at 60 fps. Related flags: \(related)")
     }
 
     // MARK: WKNavigationDelegate

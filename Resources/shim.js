@@ -571,17 +571,17 @@
     try {
       var lo = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
       AD_KEYS.forEach(function (k) { if (settings[k] !== undefined) lo[k] = settings[k]; });
-      // Render at 1080 lines (3x the 360-line base, the hidden Resolution option). Right after an
-      // out-of-memory kill, use 720 lines (2x) for that launch.
-      lo['pixel-size'] = boot.lowMemory ? 1 : 2;
-      if (boot.lowMemory) toast('iOS closed the game last time (out of memory): using 720p for this session');
+      // Render at 720 lines (2x the 360-line base; the Resolution option is hidden). 1080 lines
+      // (2340x1080) exceeded the memory iOS allows the page and the game was killed during boot.
+      lo['pixel-size'] = 1;
+      if (typeof lo['show-fps'] !== 'boolean') lo['show-fps'] = !!lo['show-fps'];
       if (typeof lo['screen-aspect'] !== 'number' || lo['screen-aspect'] < 0 || lo['screen-aspect'] > 2) lo['screen-aspect'] = 1;
       localStorage.setItem('xg_local_options', JSON.stringify(lo));
       aspectMode = lo['screen-scaling'] === 1 ? 'fill' : 'fit';
       var adAspect = lo['screen-aspect'];
       // Patched SYSTEM_CONF.SCREEN_WIDTH reads this at startup (base 640x360); keep it even.
       window.__adaScreenWidth = Math.round(360 * ASPECTS[adAspect] / 2) * 2;
-      frameCap = lo['frame-rate'] === 1 ? 120 : 60; showFps = lo['show-fps'] === true;
+      frameCap = lo['frame-rate'] === 1 ? 120 : 60; showFps = !!lo['show-fps'];
       log('alabaster view ' + window.__adaScreenWidth + 'x360 (' + ASPECT_NAMES[adAspect] + ') render ' +
         window.__adaScreenWidth * (lo['pixel-size'] + 1) + 'x' + 360 * (lo['pixel-size'] + 1) + ', scaling ' + aspectMode +
         ', cap ' + frameCap + ', showFps ' + showFps);
@@ -590,7 +590,7 @@
       try {
         var o = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
         AD_KEYS.forEach(function (k) { if (o[k] !== undefined && settings[k] !== o[k]) { log('option ' + k + ' -> ' + o[k]); saveSetting(k, o[k]); } });
-        frameCap = o['frame-rate'] === 1 ? 120 : 60; showFps = o['show-fps'] === true;
+        frameCap = o['frame-rate'] === 1 ? 120 : 60; showFps = !!o['show-fps'];
         var m = o['screen-scaling'] === 1 ? 'fill' : 'fit';
         if (m !== aspectMode) { aspectMode = m; applyAspect(); }
         if (typeof o['screen-aspect'] === 'number' && o['screen-aspect'] !== adAspect) {
@@ -610,7 +610,7 @@
     fixed.IG_WIDTH = curAsp === 0 ? 568 : Math.round(320 * ASPECTS[curAsp]);
     // Render at 3x (960 lines): the nearest whole-number scale to 1080p for CrossCode's 320-line view.
     fixed.IG_GAME_SCALE = 3;
-    frameCap = settings['ada-frame-rate'] === 1 ? 120 : 60; showFps = settings['ada-show-fps'] === true;
+    frameCap = settings['ada-frame-rate'] === 1 ? 120 : 60; showFps = !!settings['ada-show-fps'];
     log('crosscode view ' + fixed.IG_WIDTH + 'x320 (' + ASPECT_NAMES[curAsp] + ') render ' + fixed.IG_WIDTH * 3 + 'x960, cap ' + frameCap);
     ['IG_WIDTH', 'IG_HEIGHT', 'IG_GAME_SCALE'].forEach(function (k) {
       Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
@@ -645,14 +645,14 @@
         var a = vals['ada-aspect'];
         var fr = vals['ada-frame-rate'], sf = vals['ada-show-fps'];
         if (ccSynced && typeof fr === 'number' && fr !== settings['ada-frame-rate']) { saveSetting('ada-frame-rate', fr); log('frame rate -> ' + (fr ? 120 : 60)); }
-        if (ccSynced && typeof sf === 'boolean' && sf !== settings['ada-show-fps']) { saveSetting('ada-show-fps', sf); }
-        if (ccSynced) { frameCap = settings['ada-frame-rate'] === 1 ? 120 : 60; showFps = settings['ada-show-fps'] === true; }
+        if (ccSynced && typeof sf === 'boolean' && sf !== !!settings['ada-show-fps']) { saveSetting('ada-show-fps', sf); }
+        if (ccSynced) { frameCap = settings['ada-frame-rate'] === 1 ? 120 : 60; showFps = !!settings['ada-show-fps']; }
         if (!ccSynced) {
           // Until the title screen shows, the options are still being loaded from the save file: keep
           // them showing the value this launch uses (the app's copy), so loading is not taken as a change.
           if (a !== curAsp) vals['ada-aspect'] = curAsp;
           if (typeof settings['ada-frame-rate'] === 'number') vals['ada-frame-rate'] = settings['ada-frame-rate'];
-          if (typeof settings['ada-show-fps'] === 'boolean') vals['ada-show-fps'] = settings['ada-show-fps'];
+          if (settings['ada-show-fps'] !== undefined) vals['ada-show-fps'] = !!settings['ada-show-fps'];
           if (sc.model && sc.model.isTitle && sc.model.isTitle()) ccSynced = true;
           return;
         }
