@@ -3,7 +3,7 @@ import WebKit
 import UniformTypeIdentifiers
 import GameController
 
-final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocumentPickerDelegate {
+final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocumentPickerDelegate, WKNavigationDelegate {
     private var webView: WKWebView?
     private var current: GameDef?
     private let titleLabel = UILabel()
@@ -132,8 +132,10 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.userContentController.add(self, name: "ada")
 
+        let manifest = store.manifest(root: root)
+        startGameLog(game, root: root, files: manifest.count)
         let boot: [String: Any] = [
-            "manifest": store.manifest(root: root),
+            "manifest": manifest,
             "saves": store.loadSaves(game),
             "fsPrefix": game.fsPrefix,
             "dataPath": game.dataPath,
@@ -158,6 +160,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         wv.backgroundColor = .black
         wv.scrollView.backgroundColor = .black
         if #available(iOS 16.4, *) { wv.isInspectable = true }
+        wv.navigationDelegate = self
         view.addSubview(wv)
         NSLayoutConstraint.activate([
             wv.topAnchor.constraint(equalTo: view.topAnchor),
@@ -185,6 +188,11 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
                 UserDefaults.standard.set(s, forKey: "settings.\(g.id)")
             }
         case "log": appendLog((d["msg"] as? String) ?? "")
+        case "relaunch":
+            if let g = current {
+                appendLog("relaunching to apply display settings")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.showMenu(); self.launch(g) }
+            }
         case "quit", "menu":
             // Give pending save messages a moment, then return to the launcher.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.showMenu() }
@@ -192,22 +200,57 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         }
     }
 
-    /// Appends to Documents/AlabasterDawn.log (visible in the Files app). Truncated on each launch.
+    // MARK: logs — Documents/Logs/<game>.log (and launcher.log), visible in the Files app.
+    // Each game launch moves the previous log to <game>.prev.log.
     private static let logQueue = DispatchQueue(label: "ada.log")
-    private static var logStarted = false
+    private static var logsDir: URL {
+        let u = GameStore.shared.docs.appendingPathComponent("Logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+        return u
+    }
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; f.locale = Locale(identifier: "en_US_POSIX"); return f
+    }()
+
+    private func startGameLog(_ game: GameDef, root: URL, files: Int) {
+        let dir = Self.logsDir
+        let cur = dir.appendingPathComponent("\(game.id).log"), prev = dir.appendingPathComponent("\(game.id).prev.log")
+        Self.logQueue.sync {
+            try? FileManager.default.removeItem(at: prev)
+            try? FileManager.default.moveItem(at: cur, to: prev)
+            FileManager.default.createFile(atPath: cur.path, contents: nil)
+        }
+        var sys = utsname(); uname(&sys)
+        let model = withUnsafeBytes(of: &sys.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        appendLog("=== \(game.title) launch | device \(model) iOS \(UIDevice.current.systemVersion) | app \(ver) | RAM \(ProcessInfo.processInfo.physicalMemory / 1_048_576) MB")
+        appendLog("root \(root.path) | files \(files) | saves \(GameStore.shared.loadSaves(game).count) | settings \(settings(game.id))")
+        appendLog("screen \(UIScreen.main.bounds.size) scale \(UIScreen.main.scale) native \(UIScreen.main.nativeBounds.size)")
+        appendLog("controllers: " + GCController.controllers().map { "\($0.vendorName ?? "?") extended=\($0.extendedGamepad != nil)" }.joined(separator: ", "))
+    }
+
     private func appendLog(_ msg: String) {
-        let url = GameStore.shared.docs.appendingPathComponent("AlabasterDawn.log")
-        let line = "[\(ISO8601DateFormatter().string(from: Date()))] [\(current?.id ?? "-")] \(msg)\n"
+        let url = Self.logsDir.appendingPathComponent("\(current?.id ?? "launcher").log")
+        let line = "[\(Self.stamp.string(from: Date()))] \(msg)\n"
         Self.logQueue.async {
-            if !Self.logStarted {
-                Self.logStarted = true
-                try? Data().write(to: url)
-            }
+            if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
             guard let data = line.data(using: .utf8), let h = try? FileHandle(forWritingTo: url) else { return }
             defer { try? h.close() }
             h.seekToEndOfFile()
-            if h.offsetInFile < 2_000_000 { h.write(data) }
+            if h.offsetInFile < 5_000_000 { h.write(data) }
         }
+    }
+
+    // MARK: WKNavigationDelegate
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { appendLog("page loaded: \(webView.url?.absoluteString ?? "?")") }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { appendLog("NAVIGATION FAILED: \(error)") }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { appendLog("PAGE LOAD FAILED: \(error)") }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // iOS killed the page's process (usually out of memory). Without this the screen just stays black.
+        appendLog("WEB CONTENT PROCESS TERMINATED (likely out of memory). Returning to the launcher.")
+        let title = current?.title ?? "The game"
+        showMenu()
+        status.text = "\(title) stopped: iOS closed the game's web process (likely out of memory). Details are in Files > Logs."
     }
 
     /// Forwards a physical controller (GameController framework) to the shim as a standard-layout pad.

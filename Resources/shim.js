@@ -261,7 +261,7 @@
     var OV = window['ogg-vorbis-decoder'];
     if (!BAC || !BAC.prototype.decodeAudioData || !OV) return;
     var nativeDecode = BAC.prototype.decodeAudioData;
-    var nativeOggBroken = !!window.__ADA_FORCE_WASM_OGG, pool = [], next = 0, okCount = 0, failCount = 0;
+    var nativeOggBroken = !!window.__ADA_FORCE_WASM_OGG, pool = [], next = 0, okCount = 0, failCount = 0, pcmBytes = 0;
     function decoder() {
       if (!pool.length) {
         for (var i = 0; i < 3; i++) {
@@ -299,14 +299,14 @@
           return wasmDecode(ctx, copy);
         });
       }
-      p = p.then(function (b) { okCount++; return b; }, function (e) {
+      p = p.then(function (b) { okCount++; if (b) pcmBytes += b.length * b.numberOfChannels * 4; return b; }, function (e) {
         if (++failCount <= 5) log('audio decode failed: ' + e);
         throw e;
       });
       p.then(function (b) { ok && ok(b); }, function (e) { err && err(e); });
       return p;
     };
-    window.__adaAudioStats = function () { return { ok: okCount, fail: failCount, wasm: nativeOggBroken }; };
+    window.__adaAudioStats = function () { return { ok: okCount, fail: failCount, wasm: nativeOggBroken, mb: Math.round(pcmBytes / 1048576) }; };
   })();
 
   var suspended = false;
@@ -346,6 +346,46 @@
     for (var a = 0; a < 4; a++) vpad.axes[a] = nativeState.a[a] || 0;
   }
 
+  // ---------- diagnostics heartbeat (goes to Documents/Logs/<game>.log) ----------
+  var frames = 0, oRAF = window.requestAnimationFrame;
+  window.requestAnimationFrame = function (cb) { return oRAF.call(window, function (t) { frames++; cb(t); }); };
+  var lastErrCount = 0, hbStart = Date.now();
+  setInterval(function () {
+    var parts = ['t=' + Math.round((Date.now() - hbStart) / 1000) + 's', 'fps=' + Math.round(frames / 3)];
+    frames = 0;
+    try {
+      parts.push('vis=' + document.visibilityState + (suspended ? '/suspended' : ''));
+      var a = window.__adaAudioStats && __adaAudioStats();
+      if (a) parts.push('audio ok=' + a.ok + ' fail=' + a.fail + ' wasm=' + a.wasm + ' pcm=' + a.mb + 'MB');
+      parts.push('ctx=' + ctxs.map(function (c) { return c.state; }).join(','));
+      var c = document.querySelector('canvas');
+      if (c) parts.push('canvas=' + c.width + 'x' + c.height + ' css=' + c.clientWidth + 'x' + c.clientHeight);
+      if (window.g && g.resource) {
+        var bt = g.resource.bootTracker;
+        if (bt) parts.push('boot state=' + bt.state + ' max=' + bt.maxResource);
+        var errs = g.resource.errors || [];
+        parts.push('resErrors=' + errs.length);
+        for (; lastErrCount < errs.length && lastErrCount < 40; lastErrCount++) {
+          var er = errs[lastErrCount];
+          log('RESOURCE ERROR ' + (er && (er.message || er.error && er.error.message || (er.resource && er.resource.path) || String(er))).toString().slice(0, 200));
+        }
+      }
+      if (window.ig && ig.system) parts.push('ig=' + ig.system.width + 'x' + ig.system.height + 'x' + ig.system.scale + (window.sc && sc.model ? ' title=' + (sc.model.isTitle && sc.model.isTitle()) : ''));
+      parts.push('pads real=' + hasReal + ' native=' + nativeConnected);
+    } catch (e) { parts.push('hb error ' + e); }
+    log('HB ' + parts.join(' | '));
+  }, 3000);
+  document.addEventListener('visibilitychange', function () { log('visibility ' + document.visibilityState); });
+  window.addEventListener('load', function () { log('window load event'); });
+  document.addEventListener('DOMContentLoaded', function () { log('DOMContentLoaded'); });
+  ['log', 'info'].forEach(function (k) {
+    var o = console[k], n = 0;
+    console[k] = function () {
+      if (n++ < 150) log(k + ': ' + [].map.call(arguments, function (x) { return typeof x === 'string' ? x.replace(/%c/g, '') : (x && x.message) || String(x); }).join(' ').slice(0, 200));
+      return o.apply(console, arguments);
+    };
+  });
+
   // ---------- display settings (in-game options, mirrored to native so they survive restarts) ----------
   var settings = boot.settings || {};
   function saveSetting(k, v) {
@@ -371,39 +411,71 @@
   document.addEventListener('DOMContentLoaded', function () { applyAspect(); setInterval(applyAspect, 1000); });
   window.addEventListener('resize', applyAspect);
 
+  // Aspect ratio = how wide the game's view is (a real wider view, not a stretch). Height stays fixed.
+  var ASPECTS = [16 / 9, nativeW / nativeH, 1.943];
+  var ASPECT_NAMES = ['16:9', 'Full Screen', '1.943:1'];
+  function toast(msg) {
+    var t = document.getElementById('__ada_toast');
+    if (!t) {
+      t = document.createElement('div'); t.id = '__ada_toast';
+      t.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:100001;color:#fff;' +
+        'font:600 15px -apple-system,sans-serif;background:rgba(0,0,0,.75);padding:8px 14px;border-radius:10px;pointer-events:none';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg; t.style.display = 'block';
+    clearTimeout(t._h); t._h = setTimeout(function () { t.style.display = 'none'; }, 4000);
+  }
+
   if (boot.gameId === 'alabaster') {
-    var AD_KEYS = ['pixel-size', 'screen-scaling'];
-    // Seed the engine's local options from the native copy, and drop out-of-range resolution values.
+    var AD_KEYS = ['pixel-size', 'screen-scaling', 'screen-aspect'];
+    // Seed the engine's local options from the native copy, and drop out-of-range values.
     try {
       var lo = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
       AD_KEYS.forEach(function (k) { if (typeof settings[k] === 'number') lo[k] = settings[k]; });
       if (typeof lo['pixel-size'] === 'number' && (lo['pixel-size'] < 0 || lo['pixel-size'] > 4)) lo['pixel-size'] = 0;
+      if (typeof lo['screen-aspect'] !== 'number' || lo['screen-aspect'] < 0 || lo['screen-aspect'] > 2) lo['screen-aspect'] = 1;
       localStorage.setItem('xg_local_options', JSON.stringify(lo));
       aspectMode = lo['screen-scaling'] === 1 ? 'fill' : 'fit';
-    } catch (e) {}
+      var adAspect = lo['screen-aspect'];
+      // Patched SYSTEM_CONF.SCREEN_WIDTH reads this at startup (base 640x360); keep it even.
+      window.__adaScreenWidth = Math.round(360 * ASPECTS[adAspect] / 2) * 2;
+      log('alabaster view ' + window.__adaScreenWidth + 'x360 (' + ASPECT_NAMES[adAspect] + '), pixel-size ' + lo['pixel-size'] +
+        ', scaling ' + aspectMode + ', native scale ' + window.__adaNativeScale);
+    } catch (e) { log('alabaster settings seed failed: ' + e); }
     setInterval(function () {
       try {
         var o = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
-        AD_KEYS.forEach(function (k) { if (typeof o[k] === 'number') saveSetting(k, o[k]); });
+        AD_KEYS.forEach(function (k) { if (typeof o[k] === 'number' && settings[k] !== o[k]) { log('option ' + k + ' -> ' + o[k]); saveSetting(k, o[k]); } });
         var m = o['screen-scaling'] === 1 ? 'fill' : 'fit';
         if (m !== aspectMode) { aspectMode = m; applyAspect(); }
+        if (typeof o['screen-aspect'] === 'number' && o['screen-aspect'] !== adAspect) {
+          adAspect = o['screen-aspect'];
+          toast('Aspect ratio ' + ASPECT_NAMES[adAspect] + ': restart the game to apply (⌂ menu, then start again)');
+        }
       } catch (e) {}
     }, 500);
   }
 
   if (boot.gameId === 'crosscode') {
-    // Patched "Resolution" option: logical game size = resolution / integer pixel scale (CrossCode needs >= 320 lines).
-    // Wider resolutions give a wider view of the world; applied live and again on the next launch.
-    var RES = [[nativeW, nativeH], [2106, 1084], [1920, 1080], [1600, 900], [1280, 720]];
+    // Patched options: "Aspect Ratio" sets the logical view width (height stays 320, the game's native
+    // height), "Resolution" only sets the render sharpness (integer pixel scale, as CrossCode requires).
+    var RES_H = [nativeH, 1084, 1080, 900, 720];
     var fixed = {};
-    var applyRes = function (v) {
-      var r = RES[v] || RES[0];
-      var s = Math.max(1, Math.min(4, Math.floor(r[1] / 320)));
-      fixed.IG_WIDTH = Math.round(r[0] / s); fixed.IG_HEIGHT = Math.round(r[1] / s); fixed.IG_GAME_SCALE = s;
-      log('crosscode logical ' + fixed.IG_WIDTH + 'x' + fixed.IG_HEIGHT + ' x' + s);
+    var curRes = typeof settings['ada-resolution'] === 'number' ? settings['ada-resolution'] : 0;
+    var curAsp = typeof settings['ada-aspect'] === 'number' ? settings['ada-aspect'] : 1;
+    var computeCC = function () {
+      fixed.IG_HEIGHT = 320;
+      fixed.IG_WIDTH = curAsp === 0 ? 568 : Math.round(320 * ASPECTS[curAsp]);
+      fixed.IG_GAME_SCALE = Math.max(1, Math.min(4, Math.round((RES_H[curRes] || nativeH) / 320)));
+      log('crosscode view ' + fixed.IG_WIDTH + 'x320 (' + ASPECT_NAMES[curAsp] + ') render x' + fixed.IG_GAME_SCALE +
+        ' = ' + fixed.IG_WIDTH * fixed.IG_GAME_SCALE + 'x' + 320 * fixed.IG_GAME_SCALE);
     };
-    // The title-screen artwork is 568x320. At wider resolutions, scale it up to cover the screen
-    // (cropping a little) instead of leaving black bars on the right.
+    computeCC();
+    ['IG_WIDTH', 'IG_HEIGHT', 'IG_GAME_SCALE'].forEach(function (k) {
+      Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
+    });
+    // The title-screen artwork is 568x320. At wider aspect ratios, scale it up to cover the screen
+    // (cropping a little) instead of leaving black on the right.
     var titleFix = setInterval(function () {
       if (!(window.ig && ig.ParallaxGui && ig.ParallaxGui.inject)) return;
       clearInterval(titleFix);
@@ -424,21 +496,29 @@
         }
       });
     }, 20);
-    var curRes = typeof settings['ada-resolution'] === 'number' ? settings['ada-resolution'] : 0;
-    applyRes(curRes);
-    ['IG_WIDTH', 'IG_HEIGHT', 'IG_GAME_SCALE'].forEach(function (k) {
-      Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
-    });
     setInterval(function () {
       try {
-        var v = window.sc && sc.options && sc.options.values && sc.options.values['ada-resolution'];
-        if (typeof v !== 'number' || v === curRes) return;
-        curRes = v; saveSetting('ada-resolution', v); applyRes(v);
-        if (window.ig && ig.system) {
-          ig.system.resize(fixed.IG_WIDTH, fixed.IG_HEIGHT, fixed.IG_GAME_SCALE);
+        var vals = window.sc && sc.options && sc.options.values;
+        if (!vals || !window.ig || !ig.system) return;
+        var r = vals['ada-resolution'], a = vals['ada-aspect'];
+        if (typeof r === 'number' && r !== curRes) {
+          // Render scale only: safe to apply live.
+          curRes = r; saveSetting('ada-resolution', r); computeCC();
+          ig.system.resize(ig.system.width, ig.system.height, fixed.IG_GAME_SCALE);
           sc.options._setDisplaySize();
         }
-      } catch (e) { log('resolution change failed: ' + e); }
+        if (typeof a === 'number' && a !== curAsp) {
+          curAsp = a; saveSetting('ada-aspect', a); computeCC();
+          // Menus are laid out for the old width, so restart the game (from disk, keeping saves).
+          if (sc.model && sc.model.isTitle && sc.model.isTitle()) {
+            try { sc.options.persistOptions(); } catch (e) {}
+            log('aspect changed on title screen: relaunching');
+            setTimeout(function () { post({ op: 'relaunch' }); }, 600);
+          } else {
+            toast('Aspect ratio ' + ASPECT_NAMES[a] + ': applies after restarting the game');
+          }
+        }
+      } catch (e) { log('display option change failed: ' + e); }
     }, 500);
   }
   function patched() {
