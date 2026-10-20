@@ -381,6 +381,39 @@
     return /ogg|vorbis/i.test(String(t)) ? 'probably' : oCanPlay.call(this, t);
   };
 
+  // Reverb: WebKit requires a ConvolverNode buffer at the context's sample rate, and Alabaster
+  // Dawn's sounds are stored at half rate (above). Resample impulse responses when they are set.
+  (function () {
+    var CN = window.ConvolverNode, d = CN && Object.getOwnPropertyDescriptor(CN.prototype, 'buffer');
+    if (!d || !d.set) return;
+    var cache = new WeakMap();
+    Object.defineProperty(CN.prototype, 'buffer', {
+      configurable: true, enumerable: d.enumerable, get: d.get,
+      set: function (b) {
+        try {
+          var rate = this.context.sampleRate;
+          if (b && b.sampleRate !== rate) {
+            var r = cache.get(b);
+            if (!r) {
+              var ratio = b.sampleRate / rate, len = Math.max(1, Math.round(b.length / ratio));
+              r = this.context.createBuffer(b.numberOfChannels, len, rate);
+              for (var c = 0; c < b.numberOfChannels; c++) {
+                var src = b.getChannelData(c), dst = r.getChannelData(c), last = src.length - 1;
+                for (var i = 0; i < len; i++) {
+                  var x = i * ratio, i0 = Math.min(last, x | 0), f = x - i0;
+                  dst[i] = src[i0] + (src[Math.min(last, i0 + 1)] - src[i0]) * f;
+                }
+              }
+              cache.set(b, r);
+            }
+            b = r;
+          }
+        } catch (e) { log('reverb resample failed: ' + e); }
+        d.set.call(this, b);
+      }
+    });
+  })();
+
   var suspended = false;
   function resumeAll() { ctxs.forEach(function (c) { if (c.state !== 'running') c.resume().catch(noop); }); }
   ['touchstart', 'touchend', 'pointerdown', 'click', 'keydown'].forEach(function (ev) {
@@ -419,8 +452,37 @@
   }
 
   // ---------- diagnostics heartbeat (goes to Documents/Logs/<game>.log) ----------
-  var frames = 0, oRAF = window.requestAnimationFrame;
-  window.requestAnimationFrame = function (cb) { return oRAF.call(window, function (t) { frames++; cb(t); }); };
+  // Frame-rate cap (in-game "Frame Rate" option) and the "Show FPS" counter. The app lets WebKit run
+  // requestAnimationFrame at the display rate (up to 120 Hz); at the 60 cap every other frame is skipped.
+  var frameCap = 60, showFps = false;
+  var frames = 0, oRAF = window.requestAnimationFrame, oCAF = window.cancelAnimationFrame, lastRun = 0, fpsFrames = 0, fpsShown = 0;
+  var rafIds = {}, rafNext = 1;
+  window.requestAnimationFrame = function (cb) {
+    var id = rafNext++;
+    var wrapped = function (t) {
+      if (frameCap < 120 && lastRun && t - lastRun < 1000 / frameCap - 3) { rafIds[id] = oRAF.call(window, wrapped); return; }
+      delete rafIds[id];
+      lastRun = t; frames++; fpsFrames++;
+      cb(t);
+    };
+    rafIds[id] = oRAF.call(window, wrapped);
+    return id;
+  };
+  window.cancelAnimationFrame = function (id) {
+    if (rafIds[id] !== undefined) { oCAF.call(window, rafIds[id]); delete rafIds[id]; }
+  };
+  setInterval(function () {
+    fpsShown = fpsFrames * 2; fpsFrames = 0;
+    var el = document.getElementById('__ada_fps');
+    if (!showFps) { if (el) el.style.display = 'none'; return; }
+    if (!el && document.body) {
+      el = document.createElement('div'); el.id = '__ada_fps';
+      el.style.cssText = 'position:fixed;left:calc(6px + env(safe-area-inset-left));top:4px;z-index:100002;color:#0f0;' +
+        'font:700 13px ui-monospace,monospace;background:rgba(0,0,0,.55);padding:1px 6px;border-radius:4px;pointer-events:none';
+      document.body.appendChild(el);
+    }
+    if (el) { el.style.display = 'block'; el.textContent = fpsShown + ' FPS'; }
+  }, 500);
   var lastErrCount = 0, hbStart = Date.now();
   (function hbLoop() { setTimeout(function () { hb(); hbLoop(); }, Date.now() - hbStart < 30000 ? 1000 : 3000); })();
   var hbLast = Date.now();
@@ -487,7 +549,9 @@
   window.addEventListener('resize', applyAspect);
 
   // Aspect ratio = how wide the game's view is (a real wider view, not a stretch). Height stays fixed.
-  var ASPECTS = [16 / 9, nativeW / nativeH, 1.943];
+  var fullAspect = nativeW > 0 && nativeH > 0 ? nativeW / nativeH :
+    (innerWidth > 0 && innerHeight > 0 ? Math.max(innerWidth, innerHeight) / Math.min(innerWidth, innerHeight) : 16 / 9);
+  var ASPECTS = [16 / 9, Math.max(16 / 9, Math.min(2.4, fullAspect)), 1.943];
   var ASPECT_NAMES = ['16:9', 'Full Screen', '1.943:1'];
   function toast(msg) {
     var t = document.getElementById('__ada_toast');
@@ -502,27 +566,31 @@
   }
 
   if (boot.gameId === 'alabaster') {
-    var AD_KEYS = ['pixel-size', 'screen-scaling', 'screen-aspect'];
+    var AD_KEYS = ['screen-scaling', 'screen-aspect', 'frame-rate', 'show-fps'];
     // Seed the engine's local options from the native copy, and drop out-of-range values.
     try {
       var lo = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
-      AD_KEYS.forEach(function (k) { if (typeof settings[k] === 'number') lo[k] = settings[k]; });
-      if (typeof lo['pixel-size'] === 'number' && (lo['pixel-size'] < 0 || lo['pixel-size'] > 2)) lo['pixel-size'] = 1;
-      // The Resolution list changed in this build: reset it once to the default (1280x720).
-      if (settings['res-list'] !== 2) { lo['pixel-size'] = 1; saveSetting('pixel-size', 1); saveSetting('res-list', 2); }
+      AD_KEYS.forEach(function (k) { if (settings[k] !== undefined) lo[k] = settings[k]; });
+      // Render at 1080 lines (3x the 360-line base, the hidden Resolution option). Right after an
+      // out-of-memory kill, use 720 lines (2x) for that launch.
+      lo['pixel-size'] = boot.lowMemory ? 1 : 2;
+      if (boot.lowMemory) toast('iOS closed the game last time (out of memory): using 720p for this session');
       if (typeof lo['screen-aspect'] !== 'number' || lo['screen-aspect'] < 0 || lo['screen-aspect'] > 2) lo['screen-aspect'] = 1;
       localStorage.setItem('xg_local_options', JSON.stringify(lo));
       aspectMode = lo['screen-scaling'] === 1 ? 'fill' : 'fit';
       var adAspect = lo['screen-aspect'];
       // Patched SYSTEM_CONF.SCREEN_WIDTH reads this at startup (base 640x360); keep it even.
       window.__adaScreenWidth = Math.round(360 * ASPECTS[adAspect] / 2) * 2;
-      log('alabaster view ' + window.__adaScreenWidth + 'x360 (' + ASPECT_NAMES[adAspect] + '), pixel-size ' + lo['pixel-size'] +
-        ', scaling ' + aspectMode + ', native scale ' + window.__adaNativeScale);
+      frameCap = lo['frame-rate'] === 1 ? 120 : 60; showFps = lo['show-fps'] === true;
+      log('alabaster view ' + window.__adaScreenWidth + 'x360 (' + ASPECT_NAMES[adAspect] + ') render ' +
+        window.__adaScreenWidth * (lo['pixel-size'] + 1) + 'x' + 360 * (lo['pixel-size'] + 1) + ', scaling ' + aspectMode +
+        ', cap ' + frameCap + ', showFps ' + showFps);
     } catch (e) { log('alabaster settings seed failed: ' + e); }
     setInterval(function () {
       try {
         var o = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
-        AD_KEYS.forEach(function (k) { if (typeof o[k] === 'number' && settings[k] !== o[k]) { log('option ' + k + ' -> ' + o[k]); saveSetting(k, o[k]); } });
+        AD_KEYS.forEach(function (k) { if (o[k] !== undefined && settings[k] !== o[k]) { log('option ' + k + ' -> ' + o[k]); saveSetting(k, o[k]); } });
+        frameCap = o['frame-rate'] === 1 ? 120 : 60; showFps = o['show-fps'] === true;
         var m = o['screen-scaling'] === 1 ? 'fill' : 'fit';
         if (m !== aspectMode) { aspectMode = m; applyAspect(); }
         if (typeof o['screen-aspect'] === 'number' && o['screen-aspect'] !== adAspect) {
@@ -540,8 +608,11 @@
     var curAsp = typeof settings['ada-aspect'] === 'number' ? settings['ada-aspect'] : 1;
     fixed.IG_HEIGHT = 320;
     fixed.IG_WIDTH = curAsp === 0 ? 568 : Math.round(320 * ASPECTS[curAsp]);
-    log('crosscode view ' + fixed.IG_WIDTH + 'x320 (' + ASPECT_NAMES[curAsp] + ')');
-    ['IG_WIDTH', 'IG_HEIGHT'].forEach(function (k) {
+    // Render at 3x (960 lines): the nearest whole-number scale to 1080p for CrossCode's 320-line view.
+    fixed.IG_GAME_SCALE = 3;
+    frameCap = settings['ada-frame-rate'] === 1 ? 120 : 60; showFps = settings['ada-show-fps'] === true;
+    log('crosscode view ' + fixed.IG_WIDTH + 'x320 (' + ASPECT_NAMES[curAsp] + ') render ' + fixed.IG_WIDTH * 3 + 'x960, cap ' + frameCap);
+    ['IG_WIDTH', 'IG_HEIGHT', 'IG_GAME_SCALE'].forEach(function (k) {
       Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
     });
     // The title-screen artwork is 568x320. At wider aspect ratios, scale it up to cover the screen
@@ -572,10 +643,16 @@
         var vals = window.sc && sc.options && sc.options.values;
         if (!vals || !window.ig || !ig.system) return;
         var a = vals['ada-aspect'];
+        var fr = vals['ada-frame-rate'], sf = vals['ada-show-fps'];
+        if (ccSynced && typeof fr === 'number' && fr !== settings['ada-frame-rate']) { saveSetting('ada-frame-rate', fr); log('frame rate -> ' + (fr ? 120 : 60)); }
+        if (ccSynced && typeof sf === 'boolean' && sf !== settings['ada-show-fps']) { saveSetting('ada-show-fps', sf); }
+        if (ccSynced) { frameCap = settings['ada-frame-rate'] === 1 ? 120 : 60; showFps = settings['ada-show-fps'] === true; }
         if (!ccSynced) {
           // Until the title screen shows, the options are still being loaded from the save file: keep
           // them showing the value this launch uses (the app's copy), so loading is not taken as a change.
           if (a !== curAsp) vals['ada-aspect'] = curAsp;
+          if (typeof settings['ada-frame-rate'] === 'number') vals['ada-frame-rate'] = settings['ada-frame-rate'];
+          if (typeof settings['ada-show-fps'] === 'boolean') vals['ada-show-fps'] = settings['ada-show-fps'];
           if (sc.model && sc.model.isTitle && sc.model.isTitle()) ccSynced = true;
           return;
         }

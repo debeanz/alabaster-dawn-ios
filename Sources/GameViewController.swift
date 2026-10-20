@@ -131,6 +131,15 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.userContentController.add(self, name: "ada")
+        // Let requestAnimationFrame follow the display (120 Hz on ProMotion); the in-game Frame Rate option
+        // caps it to 60 in JavaScript. Private WebKit preference: only set when this WebKit has it.
+        let rafSel = NSSelectorFromString("_setPreferPageRenderingUpdatesNear60FPSEnabled:")
+        if cfg.preferences.responds(to: rafSel) {
+            cfg.preferences.setValue(false, forKey: "preferPageRenderingUpdatesNear60FPSEnabled")
+            appendLog("120 Hz: WebKit 60 fps preference disabled (max display rate \(UIScreen.main.maximumFramesPerSecond) Hz)")
+        } else {
+            appendLog("120 Hz: WebKit preference not available, page stays at 60 fps")
+        }
 
         let manifest = store.manifest(root: root)
         startGameLog(game, root: root, files: manifest.count)

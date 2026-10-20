@@ -30,3 +30,4 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIApplicationSupportsIndirectInputEvents: true
+        CADisableMinimumFrameDurationOnPhone: true

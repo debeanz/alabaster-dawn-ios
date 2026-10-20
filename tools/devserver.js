@@ -33,8 +33,9 @@ const saves = {};
 function patch(rel, buf) {
   if (gameId === 'alabaster' && rel === 'data/database/options.json') {
     let s = buf.toString('utf8').replace(raw('adPixelOld'), raw('adPixelNew'));
+    s = s.replace('"hidden":false,"label":{"en_US":"Resolution","langID":170}', '"hidden":true,"label":{"en_US":"Resolution","langID":170}');
     const i = s.indexOf('"fullscreen":{');
-    return Buffer.from(s.slice(0, i) + raw('adAspect') + raw('adScaling') + s.slice(i));
+    return Buffer.from(s.slice(0, i) + raw('adAspect') + raw('adScaling') + raw('adFps') + s.slice(i));
   }
   if (gameId === 'alabaster' && rel === 'dist/bundle.js') {
     const m = swift.match(/with: "(const RESOLUTION_MAP = .*?;)"\)/);
@@ -42,10 +43,12 @@ function patch(rel, buf) {
       .replace('system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = 640;', 'system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = (window.__adaScreenWidth || 640);'));
   }
   if (gameId === 'crosscode' && rel === 'js/game.compiled.js') {
-    return Buffer.from(buf.toString('utf8').replace(raw('ccDefAnchor'), raw('ccResDef') + raw('ccDefAnchor')));
+    return Buffer.from(buf.toString('utf8').replace(raw('ccDefAnchor'), raw('ccResDef') + raw('ccFpsDef') + raw('ccDefAnchor')).replace(raw('ccPixelSizeDef'), ''));
   }
   if (gameId === 'crosscode' && /^data\/lang\/sc\/gui\..*\.json$/.test(rel)) {
     const o = JSON.parse(buf.toString('utf8'));
+    o.labels.options['ada-frame-rate'] = { name: 'Frame Rate', group: ['60 FPS', '120 FPS'], description: 'test' };
+    o.labels.options['ada-show-fps'] = { name: 'Show FPS', description: 'test' };
     o.labels.options['ada-aspect'] = { name: 'Aspect Ratio', group: ['16:9', 'Full Screen', '1.943:1'], description: 'test' };
     return Buffer.from(JSON.stringify(o));
   }
