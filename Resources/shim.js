@@ -247,7 +247,15 @@
     var Orig = window[nm];
     if (!Orig || Orig.__ada) return;
     var P = function () {
-      var c = new (Function.prototype.bind.apply(Orig, [null].concat([].slice.call(arguments))))();
+      // The games ship 44.1 kHz audio: run the context at 44.1 kHz so decoded sounds are not
+      // resampled to 48 kHz (less memory and CPU). Falls back to the default rate if refused.
+      var args = [].slice.call(arguments), c;
+      if (!args.length) {
+        // After an out-of-memory kill, the app sets lowMemory: 22.05 kHz halves decoded-audio memory.
+        try { c = new Orig({ sampleRate: boot.lowMemory ? 22050 : 44100 }); } catch (e) { c = null; }
+      }
+      if (!c) c = new (Function.prototype.bind.apply(Orig, [null].concat(args)))();
+      log('AudioContext ' + c.sampleRate + ' Hz');
       ctxs.push(c); return c;
     };
     P.prototype = Orig.prototype; P.__ada = true;
@@ -285,20 +293,38 @@
       });
     }
     function isOgg(b) { return b.length > 4 && b[0] === 0x4f && b[1] === 0x67 && b[2] === 0x67 && b[3] === 0x53; }
-    BAC.prototype.decodeAudioData = function (data, ok, err) {
-      var ctx = this, bytes = new Uint8Array(data);
-      var p;
-      if (!isOgg(bytes)) {
-        p = nativeDecode.call(ctx, data);
-      } else if (nativeOggBroken) {
-        p = wasmDecode(ctx, bytes.slice());
-      } else {
-        var copy = bytes.slice();
-        p = Promise.resolve().then(function () { return nativeDecode.call(ctx, data); }).catch(function (e) {
-          if (!nativeOggBroken) { nativeOggBroken = true; log('WebKit cannot decode Ogg (' + e + '), using WASM Vorbis decoder'); }
-          return wasmDecode(ctx, copy);
+    // At most 4 decodes at a time: the games start hundreds at once during boot, and the
+    // transient memory got WebKit's page process killed on iPhone (Alabaster Dawn black screen).
+    var MAX_DECODES = 4, active = 0, waiting = [], nativeOggOK = false;
+    function runQueued(job) {
+      return new Promise(function (resolve, reject) {
+        waiting.push(function () {
+          active++;
+          job().then(resolve, reject).then(function () {
+            active--;
+            if (waiting.length) waiting.shift()();
+          });
         });
-      }
+        if (active < MAX_DECODES) waiting.shift()();
+      });
+    }
+    function decodeOne(ctx, data) {
+      var bytes = new Uint8Array(data);
+      if (!isOgg(bytes)) return nativeDecode.call(ctx, data);
+      if (nativeOggBroken) return wasmDecode(ctx, bytes);
+      // Keep a copy for the WASM fallback only until WebKit has proven it can decode Ogg.
+      var copy = nativeOggOK ? null : bytes.slice();
+      return Promise.resolve().then(function () { return nativeDecode.call(ctx, data); }).then(function (b) {
+        nativeOggOK = true; return b;
+      }, function (e) {
+        if (!copy) throw e;
+        if (!nativeOggBroken) { nativeOggBroken = true; log('WebKit cannot decode Ogg (' + e + '), using WASM Vorbis decoder'); }
+        return wasmDecode(ctx, copy);
+      });
+    }
+    BAC.prototype.decodeAudioData = function (data, ok, err) {
+      var ctx = this;
+      var p = runQueued(function () { return decodeOne(ctx, data); });
       p = p.then(function (b) { okCount++; if (b) pcmBytes += b.length * b.numberOfChannels * 4; return b; }, function (e) {
         if (++failCount <= 5) log('audio decode failed: ' + e);
         throw e;
@@ -306,8 +332,18 @@
       p.then(function (b) { ok && ok(b); }, function (e) { err && err(e); });
       return p;
     };
-    window.__adaAudioStats = function () { return { ok: okCount, fail: failCount, wasm: nativeOggBroken, mb: Math.round(pcmBytes / 1048576) }; };
+    window.__adaAudioStats = function () {
+      return { ok: okCount, fail: failCount, wasm: nativeOggBroken, mb: Math.round(pcmBytes / 1048576), queued: waiting.length };
+    };
   })();
+
+  // CrossCode picks its sound format with new Audio().canPlayType(); WebKit answers inconsistently for
+  // Ogg (seen: "" after a relaunch, which crashes the game). Ogg is decoded through Web Audio above
+  // (native or WASM), so report it as playable.
+  var oCanPlay = HTMLMediaElement.prototype.canPlayType;
+  HTMLMediaElement.prototype.canPlayType = function (t) {
+    return /ogg|vorbis/i.test(String(t)) ? 'probably' : oCanPlay.call(this, t);
+  };
 
   var suspended = false;
   function resumeAll() { ctxs.forEach(function (c) { if (c.state !== 'running') c.resume().catch(noop); }); }
@@ -350,13 +386,16 @@
   var frames = 0, oRAF = window.requestAnimationFrame;
   window.requestAnimationFrame = function (cb) { return oRAF.call(window, function (t) { frames++; cb(t); }); };
   var lastErrCount = 0, hbStart = Date.now();
-  setInterval(function () {
-    var parts = ['t=' + Math.round((Date.now() - hbStart) / 1000) + 's', 'fps=' + Math.round(frames / 3)];
+  (function hbLoop() { setTimeout(function () { hb(); hbLoop(); }, Date.now() - hbStart < 30000 ? 1000 : 3000); })();
+  var hbLast = Date.now();
+  function hb() {
+    var dt = (Date.now() - hbLast) / 1000; hbLast = Date.now();
+    var parts = ['t=' + Math.round((Date.now() - hbStart) / 1000) + 's', 'fps=' + Math.round(frames / dt)];
     frames = 0;
     try {
       parts.push('vis=' + document.visibilityState + (suspended ? '/suspended' : ''));
       var a = window.__adaAudioStats && __adaAudioStats();
-      if (a) parts.push('audio ok=' + a.ok + ' fail=' + a.fail + ' wasm=' + a.wasm + ' pcm=' + a.mb + 'MB');
+      if (a) parts.push('audio ok=' + a.ok + ' queued=' + a.queued + ' fail=' + a.fail + ' wasm=' + a.wasm + ' pcm=' + a.mb + 'MB');
       parts.push('ctx=' + ctxs.map(function (c) { return c.state; }).join(','));
       var c = document.querySelector('canvas');
       if (c) parts.push('canvas=' + c.width + 'x' + c.height + ' css=' + c.clientWidth + 'x' + c.clientHeight);
@@ -374,7 +413,7 @@
       parts.push('pads real=' + hasReal + ' native=' + nativeConnected);
     } catch (e) { parts.push('hb error ' + e); }
     log('HB ' + parts.join(' | '));
-  }, 3000);
+  }
   document.addEventListener('visibilitychange', function () { log('visibility ' + document.visibilityState); });
   window.addEventListener('load', function () { log('window load event'); });
   document.addEventListener('DOMContentLoaded', function () { log('DOMContentLoaded'); });

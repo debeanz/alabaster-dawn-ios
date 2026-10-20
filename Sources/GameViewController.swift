@@ -142,6 +142,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             "desktopProcess": game.desktopProcess,
             "gameId": game.id,
             "settings": settings(game.id),
+            "lowMemory": UserDefaults.standard.bool(forKey: "lowmem.\(game.id)"),
         ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"
@@ -247,7 +248,8 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { appendLog("PAGE LOAD FAILED: \(error)") }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         // iOS killed the page's process (usually out of memory). Without this the screen just stays black.
-        appendLog("WEB CONTENT PROCESS TERMINATED (likely out of memory). Returning to the launcher.")
+        appendLog("WEB CONTENT PROCESS TERMINATED (likely out of memory). Next launch uses low-memory audio. Returning to the launcher.")
+        if let g = current { UserDefaults.standard.set(true, forKey: "lowmem.\(g.id)") }
         let title = current?.title ?? "The game"
         showMenu()
         status.text = "\(title) stopped: iOS closed the game's web process (likely out of memory). Details are in Files > Logs."
