@@ -16,11 +16,11 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     private static let adPixelOld = #""type":{"default":1,"list":[{"en_US":"640x360","langID":171},{"en_US":"1280x720","langID":172},{"en_US":"1920x1080","langID":173},{"en_US":"2560x1440","langID":203},{"en_US":"4096x2160","langID":204}],"type":"RADIO_GROUP"}"#
-    private static let adPixelNew = #""type":{"default":0,"list":[{"en_US":"1280x720"},{"en_US":"1600x900"},{"en_US":"1920x1080"},{"en_US":"2106x1084"},{"en_US":"Native (max)"}],"type":"RADIO_GROUP"}"#
+    private static let adPixelNew = #""type":{"default":1,"list":[{"en_US":"640x360","langID":171},{"en_US":"1280x720","langID":172},{"en_US":"1920x1080","langID":173}],"type":"RADIO_GROUP"}"#
     private static let adAspect = #""screen-aspect":{"debug":false,"description":{"en_US":"Width of the game view. Full Screen and 1.943:1 show more of the world to the sides (not a stretch).\n\n{c:3}Restart the game to apply{c} (home button, then start again)."},"hidden":false,"label":{"en_US":"Aspect Ratio"},"local":true,"type":{"default":1,"list":[{"en_US":"16:9"},{"en_US":"Full Screen"},{"en_US":"1.943:1"}],"type":"RADIO_GROUP"},"category":"GRAPHICS"},"#
     private static let adScaling = #""screen-scaling":{"debug":false,"description":{"en_US":"Fit keeps the 16:9 picture with black bars. Stretch fills the whole screen."},"hidden":false,"inset":true,"label":{"en_US":"Screen Scaling"},"local":true,"type":{"default":0,"list":[{"en_US":"Fit"},{"en_US":"Stretch"}],"type":"RADIO_GROUP"},"category":"GRAPHICS"},"#
     private static let ccDefAnchor = #""display-type":{type:"BUTTON_GROUP",data:sc.DISPLAY_TYPE,init:sc.DISPLAY_TYPE.FIT,cat:sc.OPTION_CATEGORY.VIDEO},"#
-    private static let ccResDef = #""ada-aspect":{type:"BUTTON_GROUP",data:{R169:0,FULL:1,R1943:2},init:1,cat:sc.OPTION_CATEGORY.VIDEO},"ada-resolution":{type:"BUTTON_GROUP",data:{NATIVE:0,R2106:1,R1920:2,R1600:3,R1280:4},init:0,cat:sc.OPTION_CATEGORY.VIDEO},"#
+    private static let ccResDef = #""ada-aspect":{type:"BUTTON_GROUP",data:{R169:0,FULL:1,R1943:2},init:1,cat:sc.OPTION_CATEGORY.VIDEO},"#
 
     /// Adds/changes in-game settings by patching the served data (the game files on disk are never edited).
     private func patch(_ rel: String, _ data: Data) -> Data {
@@ -28,17 +28,18 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
         if let c = cached { return c }
         var out = data
         if gameId == "alabaster", rel == "data/database/options.json", var str = String(data: data, encoding: .utf8) {
-            // Resolution list tuned for iPhone (the stock 4096x2160 entry crashes WebKit), plus Fit/Stretch.
+            // Resolution list without the entries that crash on iPhone, plus Aspect Ratio and Fit/Stretch.
             str = str.replacingOccurrences(of: Self.adPixelOld, with: Self.adPixelNew)
             if let r = str.range(of: #""fullscreen":{"#) { str.insert(contentsOf: Self.adAspect + Self.adScaling, at: r.lowerBound) }
             out = str.data(using: .utf8) ?? data
         } else if gameId == "alabaster", rel == "dist/bundle.js", var str = String(data: data, encoding: .utf8) {
-            // Render scale relative to the 640x360 base, matching the list above.
+            // Render scale relative to the 640x360 base, matching the list above (the stock 2560x1440 and
+            // 4096x2160 entries are removed: their framebuffers crash WebKit on iPhone).
             // View width chosen by the Aspect Ratio option (the shim sets __adaScreenWidth before the game runs).
             str = str.replacingOccurrences(of: "system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = 640;",
                                            with: "system/* SYSTEM_CONF */.BD.SCREEN_WIDTH = (window.__adaScreenWidth || 640);")
             str = str.replacingOccurrences(of: "const RESOLUTION_MAP = [1, 2, 3, 4, 6];",
-                                           with: "const RESOLUTION_MAP = [2, 2.5, 3, 3, (window.__adaNativeScale || 3)];")
+                                           with: "const RESOLUTION_MAP = [1, 2, 3];")
             out = str.data(using: .utf8) ?? data
         } else if gameId == "crosscode", rel == "js/game.compiled.js", var str = String(data: data, encoding: .utf8) {
             str = str.replacingOccurrences(of: Self.ccDefAnchor, with: Self.ccResDef + Self.ccDefAnchor)
@@ -47,10 +48,7 @@ final class GameSchemeHandler: NSObject, WKURLSchemeHandler {
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   var labels = obj["labels"] as? [String: Any], var opts = labels["options"] as? [String: Any] {
             opts["ada-aspect"] = ["name": "Aspect Ratio", "group": ["16:9", "Full Screen", "1.943:1"],
-                                  "description": "Width of the game view. Wider shows more of the world. Changing it on the title screen restarts the game; in game it applies after a restart."]
-            opts["ada-resolution"] = ["name": "Resolution",
-                                      "group": ["Native", "2106x1084", "1920x1080", "1600x900", "1280x720"],
-                                      "description": "Render resolution (sharpness). Does not change how much of the world you see."]
+                                  "description": "Width of the game view. Wider shows more of the world (not a stretch). Applies the next time you start CrossCode."]
             labels["options"] = opts; obj["labels"] = labels
             out = (try? JSONSerialization.data(withJSONObject: obj, options: [.withoutEscapingSlashes])) ?? data
         }

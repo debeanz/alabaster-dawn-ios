@@ -251,8 +251,7 @@
       // resampled to 48 kHz (less memory and CPU). Falls back to the default rate if refused.
       var args = [].slice.call(arguments), c;
       if (!args.length) {
-        // After an out-of-memory kill, the app sets lowMemory: 22.05 kHz halves decoded-audio memory.
-        try { c = new Orig({ sampleRate: boot.lowMemory ? 22050 : 44100 }); } catch (e) { c = null; }
+        try { c = new Orig({ sampleRate: 44100 }); } catch (e) { c = null; }
       }
       if (!c) c = new (Function.prototype.bind.apply(Orig, [null].concat(args)))();
       log('AudioContext ' + c.sampleRate + ' Hz');
@@ -308,7 +307,36 @@
         if (active < MAX_DECODES) waiting.shift()();
       });
     }
+    // Alabaster Dawn decodes ~620 sounds at boot (331 MB as 44.1 kHz stereo float) on top of its
+    // large data files, and iOS kills the page. Store its sounds at half rate; effects and ambience
+    // in mono, music (> 60 s) in stereo (also mono after an out-of-memory kill): about 75% less memory.
+    var SHRINK = boot.gameId === 'alabaster';
+    function shrink(ctx, b) {
+      if (!SHRINK || !b || b.sampleRate < 32000) return b;
+      var n = b.numberOfChannels, len = Math.floor(b.length / 2);
+      var mono = n > 1 && (b.duration <= 60 || boot.lowMemory);
+      var out = ctx.createBuffer(mono ? 1 : n, Math.max(1, len), b.sampleRate / 2);
+      var src = [], c, i;
+      for (c = 0; c < n; c++) src.push(b.getChannelData(c));
+      if (mono) {
+        var o = out.getChannelData(0), k = 0.5 / n;
+        for (i = 0; i < len; i++) {
+          var sum = 0;
+          for (c = 0; c < n; c++) sum += src[c][2 * i] + src[c][2 * i + 1];
+          o[i] = sum * k;
+        }
+      } else {
+        for (c = 0; c < n; c++) {
+          var oc = out.getChannelData(c), sc_ = src[c];
+          for (i = 0; i < len; i++) oc[i] = (sc_[2 * i] + sc_[2 * i + 1]) * 0.5;
+        }
+      }
+      return out;
+    }
     function decodeOne(ctx, data) {
+      return decodeRaw(ctx, data).then(function (b) { return shrink(ctx, b); });
+    }
+    function decodeRaw(ctx, data) {
       var bytes = new Uint8Array(data);
       if (!isOgg(bytes)) return nativeDecode.call(ctx, data);
       if (nativeOggBroken) return wasmDecode(ctx, bytes);
@@ -325,7 +353,15 @@
     BAC.prototype.decodeAudioData = function (data, ok, err) {
       var ctx = this;
       var p = runQueued(function () { return decodeOne(ctx, data); });
-      p = p.then(function (b) { okCount++; if (b) pcmBytes += b.length * b.numberOfChannels * 4; return b; }, function (e) {
+      p = p.then(function (b) {
+        okCount++;
+        if (b) {
+          var mb = b.length * b.numberOfChannels * 4;
+          pcmBytes += mb;
+          if (b.duration > 15) log('long sound decoded: ' + b.duration.toFixed(0) + 's ' + b.numberOfChannels + 'ch ' + b.sampleRate + 'Hz = ' + (mb / 1048576).toFixed(1) + 'MB (total ' + Math.round(pcmBytes / 1048576) + 'MB)');
+        }
+        return b;
+      }, function (e) {
         if (++failCount <= 5) log('audio decode failed: ' + e);
         throw e;
       });
@@ -471,7 +507,9 @@
     try {
       var lo = JSON.parse(localStorage.getItem('xg_local_options') || '{}');
       AD_KEYS.forEach(function (k) { if (typeof settings[k] === 'number') lo[k] = settings[k]; });
-      if (typeof lo['pixel-size'] === 'number' && (lo['pixel-size'] < 0 || lo['pixel-size'] > 4)) lo['pixel-size'] = 0;
+      if (typeof lo['pixel-size'] === 'number' && (lo['pixel-size'] < 0 || lo['pixel-size'] > 2)) lo['pixel-size'] = 1;
+      // The Resolution list changed in this build: reset it once to the default (1280x720).
+      if (settings['res-list'] !== 2) { lo['pixel-size'] = 1; saveSetting('pixel-size', 1); saveSetting('res-list', 2); }
       if (typeof lo['screen-aspect'] !== 'number' || lo['screen-aspect'] < 0 || lo['screen-aspect'] > 2) lo['screen-aspect'] = 1;
       localStorage.setItem('xg_local_options', JSON.stringify(lo));
       aspectMode = lo['screen-scaling'] === 1 ? 'fill' : 'fit';
@@ -496,21 +534,14 @@
   }
 
   if (boot.gameId === 'crosscode') {
-    // Patched options: "Aspect Ratio" sets the logical view width (height stays 320, the game's native
-    // height), "Resolution" only sets the render sharpness (integer pixel scale, as CrossCode requires).
-    var RES_H = [nativeH, 1084, 1080, 900, 720];
+    // Patched "Aspect Ratio" option: sets the logical view width (height stays 320, the game's own
+    // height), so wider ratios show more of the world. It is read once at startup.
     var fixed = {};
-    var curRes = typeof settings['ada-resolution'] === 'number' ? settings['ada-resolution'] : 0;
     var curAsp = typeof settings['ada-aspect'] === 'number' ? settings['ada-aspect'] : 1;
-    var computeCC = function () {
-      fixed.IG_HEIGHT = 320;
-      fixed.IG_WIDTH = curAsp === 0 ? 568 : Math.round(320 * ASPECTS[curAsp]);
-      fixed.IG_GAME_SCALE = Math.max(1, Math.min(4, Math.round((RES_H[curRes] || nativeH) / 320)));
-      log('crosscode view ' + fixed.IG_WIDTH + 'x320 (' + ASPECT_NAMES[curAsp] + ') render x' + fixed.IG_GAME_SCALE +
-        ' = ' + fixed.IG_WIDTH * fixed.IG_GAME_SCALE + 'x' + 320 * fixed.IG_GAME_SCALE);
-    };
-    computeCC();
-    ['IG_WIDTH', 'IG_HEIGHT', 'IG_GAME_SCALE'].forEach(function (k) {
+    fixed.IG_HEIGHT = 320;
+    fixed.IG_WIDTH = curAsp === 0 ? 568 : Math.round(320 * ASPECTS[curAsp]);
+    log('crosscode view ' + fixed.IG_WIDTH + 'x320 (' + ASPECT_NAMES[curAsp] + ')');
+    ['IG_WIDTH', 'IG_HEIGHT'].forEach(function (k) {
       Object.defineProperty(window, k, { configurable: true, get: function () { return fixed[k]; }, set: function () {} });
     });
     // The title-screen artwork is 568x320. At wider aspect ratios, scale it up to cover the screen
@@ -535,27 +566,23 @@
         }
       });
     }, 20);
+    var ccSynced = false;
     setInterval(function () {
       try {
         var vals = window.sc && sc.options && sc.options.values;
         if (!vals || !window.ig || !ig.system) return;
-        var r = vals['ada-resolution'], a = vals['ada-aspect'];
-        if (typeof r === 'number' && r !== curRes) {
-          // Render scale only: safe to apply live.
-          curRes = r; saveSetting('ada-resolution', r); computeCC();
-          ig.system.resize(ig.system.width, ig.system.height, fixed.IG_GAME_SCALE);
-          sc.options._setDisplaySize();
+        var a = vals['ada-aspect'];
+        if (!ccSynced) {
+          // Until the title screen shows, the options are still being loaded from the save file: keep
+          // them showing the value this launch uses (the app's copy), so loading is not taken as a change.
+          if (a !== curAsp) vals['ada-aspect'] = curAsp;
+          if (sc.model && sc.model.isTitle && sc.model.isTitle()) ccSynced = true;
+          return;
         }
         if (typeof a === 'number' && a !== curAsp) {
-          curAsp = a; saveSetting('ada-aspect', a); computeCC();
-          // Menus are laid out for the old width, so restart the game (from disk, keeping saves).
-          if (sc.model && sc.model.isTitle && sc.model.isTitle()) {
-            try { sc.options.persistOptions(); } catch (e) {}
-            log('aspect changed on title screen: relaunching');
-            setTimeout(function () { post({ op: 'relaunch' }); }, 600);
-          } else {
-            toast('Aspect ratio ' + ASPECT_NAMES[a] + ': applies after restarting the game');
-          }
+          curAsp = a; saveSetting('ada-aspect', a);
+          log('aspect option -> ' + ASPECT_NAMES[a] + ' (applies next launch)');
+          toast('Aspect ratio ' + ASPECT_NAMES[a] + ': applies the next time you start CrossCode');
         }
       } catch (e) { log('display option change failed: ' + e); }
     }, 500);

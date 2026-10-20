@@ -134,6 +134,10 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
 
         let manifest = store.manifest(root: root)
         startGameLog(game, root: root, files: manifest.count)
+        // Low-memory audio only for the launch right after an out-of-memory kill.
+        let lowMemory = UserDefaults.standard.bool(forKey: "lowmem.\(game.id)")
+        UserDefaults.standard.removeObject(forKey: "lowmem.\(game.id)")
+        if lowMemory { appendLog("previous run was killed by iOS: using low-memory audio this launch") }
         let boot: [String: Any] = [
             "manifest": manifest,
             "saves": store.loadSaves(game),
@@ -142,7 +146,7 @@ final class GameViewController: UIViewController, WKScriptMessageHandler, UIDocu
             "desktopProcess": game.desktopProcess,
             "gameId": game.id,
             "settings": settings(game.id),
-            "lowMemory": UserDefaults.standard.bool(forKey: "lowmem.\(game.id)"),
+            "lowMemory": lowMemory,
         ]
         let json = (try? JSONSerialization.data(withJSONObject: boot)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         var src = "window.__ADA_BOOT = \(json);\n"

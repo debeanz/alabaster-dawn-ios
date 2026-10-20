@@ -47,7 +47,6 @@ function patch(rel, buf) {
   if (gameId === 'crosscode' && /^data\/lang\/sc\/gui\..*\.json$/.test(rel)) {
     const o = JSON.parse(buf.toString('utf8'));
     o.labels.options['ada-aspect'] = { name: 'Aspect Ratio', group: ['16:9', 'Full Screen', '1.943:1'], description: 'test' };
-    o.labels.options['ada-resolution'] = { name: 'Resolution', group: ['Native', '2106x1084', '1920x1080', '1600x900', '1280x720'], description: 'test' };
     return Buffer.from(JSON.stringify(o));
   }
   return buf;
